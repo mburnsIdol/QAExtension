@@ -63,4 +63,14 @@ A standalone Chrome extension (Manifest V3) that audits any web page against **W
 
 > **Security note:** to make the phone simulator work, the `declarativeNetRequest` rule removes `X-Frame-Options`, CSP and cross-origin isolation headers from **every** sub-frame response while the extension is enabled. That weakens clickjacking protection for embedded frames on every site you browse. Disable the extension when you're not using it.
 
+## To do
+
+- [ ] **One-click bug report templating:** turn any finding into a ready-to-paste bug report.
+- [ ] **Colour-blindness impact of low contrast:** show which types of colour blindness each low-contrast finding affects.
+- [ ] **List axe "needs review" items:** the summary counts them, but the elements are never shown. This covers about 8 rules, including bypass and duplicate IDs.
+- [ ] **Check the Tab Trail in Safari and Firefox:** it has only been verified against Chrome, and the other browsers differ (for example, around scroll areas).
+- [ ] **List stops inside cross-origin iframes:** the Tab Trail can only tag these frames as a single stop.
+- [ ] **Automated tests for closed Shadow DOM and audio autoplay:** neither is covered by the QA test site yet.
+- [ ] **Add the QA test site to the repo:** publish it with GitHub Pages so the team has a shareable link.
+
 See [CHANGELOG.md](CHANGELOG.md) for the version history.
