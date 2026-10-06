@@ -1,4108 +1,1990 @@
-// @ts-nocheck
+/* ==========================================================================
+   Mattccessibility Tool v1.4.0 — Side panel controller (popup.js)
+   - View state machine: welcome → progress → results | error
+   - Scan coordinator (NAVIGATE_AND_WAIT → inject → __runWcagAudit → render)
+   - Six result drawers, overlay toggles, speech/earcon player
+   - Live Tab / Screen Reader updates from the page (CONTRACT §10.4)
+   Contracts: CONTRACT.md §2–§7, §10 (window.__auditforge* APIs, AuditResult,
+   service worker messages, window.generateWcagPdfReport).
+   ========================================================================== */
+(() => {
+  'use strict';
 
-/**
- * WCAG 2.2 Compliance Auditor - Popup Controller
- * Manages URL input, active tab injection, WCAG 2.2 audit orchestration,
- * issues table rendering, and PDF report triggers.
- */
+  /* ------------------------------------------------------------------------
+     Constants (CONTRACT §5)
+     ------------------------------------------------------------------------ */
+  const INJECT_FILES = ['lib/axe.min.js', 'content/audit-runner.js'];
+  const AUDIT_TIMEOUT_MS = 120000;
+  const INJECT_TIMEOUT_MS = 30000;
 
-let currentAudit = null;
-let currentFilter = 'all';
-let currentTabId = null;
-const activePreviewFixes = new Set();
+  const DEVICES = [
+    { id: 'iphone-16-pro', name: 'Apple iPhone 16 / 15 Pro', width: 393, height: 852 },
+    { id: 'iphone-se', name: 'Apple iPhone SE', width: 375, height: 667 },
+    { id: 'galaxy-s24', name: 'Samsung Galaxy S24', width: 360, height: 780 },
+    { id: 'pixel-8', name: 'Google Pixel 8', width: 412, height: 915 },
+    { id: 'iphone-16-pro-max', name: 'Apple iPhone 16 Pro Max', width: 430, height: 932 }
+  ];
 
-// Link Health & Broken Link Auditor State
-let currentLinkAudit = null;
-let currentLinkFilter = 'all'; // 'all' | 'broken' | 'warning' | 'working'
-let isLinkAuditRunning = false;
+  const LENS_GROUPS = [
+    { title: 'Color vision deficiency', lenses: [
+      { id: 'protanopia', label: 'Protanopia', desc: 'Red-blind' },
+      { id: 'deuteranopia', label: 'Deuteranopia', desc: 'Green-blind' },
+      { id: 'tritanopia', label: 'Tritanopia', desc: 'Blue-blind' },
+      { id: 'achromatopsia', label: 'Achromatopsia', desc: 'Monochromacy' }
+    ] },
+    { title: 'Low vision', lenses: [
+      { id: 'cataracts', label: 'Cataracts', desc: 'Blur, haze and glare' },
+      { id: 'glaucoma', label: 'Glaucoma', desc: 'Peripheral tunnel vision' },
+      { id: 'macular', label: 'Macular Degeneration', desc: 'Central scotoma' },
+      { id: 'diabetic-retinopathy', label: 'Diabetic Retinopathy', desc: 'Patchy dark spots' },
+      { id: 'low-contrast', label: 'Reduced Contrast Sensitivity', desc: 'Washed-out contrast' },
+      { id: 'myopia', label: 'Severe Myopia', desc: 'Heavy distance blur' }
+    ] },
+    { title: 'Neurological & refractive', lenses: [
+      { id: 'photophobia', label: 'Photophobia', desc: 'Light-sensitive inverted view' },
+      { id: 'astigmatism', label: 'Astigmatism / Diplopia', desc: 'Double-vision ghosting' },
+      { id: 'visual-snow', label: 'Visual Snow Syndrome', desc: 'Animated static grain' }
+    ] }
+  ];
+  const LENS_LABEL = {};
+  LENS_GROUPS.forEach((g) => g.lenses.forEach((l) => { LENS_LABEL[l.id] = l.label; }));
 
-// Screen Reader Multi-Platform Speech Engine State
-let currentPersona = 'ios-voiceover'; // 'ios-voiceover' | 'android-talkback' | 'nvda' | 'narrator'
-let showCompareMatrix = false;
-let currentRotor = 'all'; // 'all' | 'heading' | 'landmark' | 'link' | 'control'
+  const PERSONAS = [
+    { id: 'voiceover', name: 'Apple iOS VoiceOver', syntax: 'Name, State, Role, Hint' },
+    { id: 'talkback', name: 'Android TalkBack', syntax: 'Name, Role, State, Hint' },
+    { id: 'nvda', name: 'NVDA', syntax: 'Role, Name, State' },
+    { id: 'narrator', name: 'Windows Narrator', syntax: 'Name, Role, State, Position' }
+  ];
 
-const PERSONA_CONFIG = {
-  'ios-voiceover': {
-    name: 'iOS VoiceOver',
-    badgeText: 'VOICEOVER CAPTION',
-    formula: '[Name], [State], [Role], [Interaction Hint]',
-    prevLabel: 'Swipe L',
-    nextLabel: 'Swipe R',
-    activateLabel: 'Double-Tap',
-    rotorIcon: '🔄',
-    rotorLabel: 'Rotor Jump',
-    voicePattern: /samantha|daniel|karen|victoria|alex|apple/i,
-  },
-  'android-talkback': {
-    name: 'Android TalkBack',
-    badgeText: 'TALKBACK CAPTION',
-    formula: '[Name], [Role], [State], [Hint]',
-    prevLabel: 'Swipe L',
-    nextLabel: 'Swipe R',
-    activateLabel: 'Double-Tap',
-    rotorIcon: '🔠',
-    rotorLabel: 'Granularity',
-    voicePattern: /google|android/i,
-  },
-  'nvda': {
-    name: 'NVDA',
-    badgeText: 'NVDA CAPTION',
-    formula: '[Role], [Name], [State]',
-    prevLabel: 'Prev [↑]',
-    nextLabel: 'Next [↓]',
-    activateLabel: 'Enter ↵',
-    rotorIcon: '⌨️',
-    rotorLabel: 'Quick [H]',
-    voicePattern: /espeak|david|zira/i,
-  },
-  'narrator': {
-    name: 'Windows Narrator',
-    badgeText: 'NARRATOR CAPTION',
-    formula: '[Name], [Role], [State], [Scan Position]',
-    prevLabel: 'Scan ⬅',
-    nextLabel: 'Scan ➔',
-    activateLabel: 'Enter ↵',
-    rotorIcon: '🪟',
-    rotorLabel: 'Scan [H]',
-    voicePattern: /microsoft|david|mark|zira|george|natural/i,
-  },
-};
+  const IMPACTS = ['critical', 'serious', 'moderate', 'minor'];
+  const IMPACT_LABEL = { critical: 'Critical', serious: 'Serious', moderate: 'Moderate', minor: 'Minor' };
 
-let isSpeechPlaying = false;
-let isSpeechPaused = false;
-let speechStepIndex = -1;
-let speechRate = 1.25;
-/** @type {SpeechSynthesisVoice|null} */
-let selectedVoice = null;
-let earconsEnabled = true;
-/** @type {SpeechSynthesisVoice[]} */
-let availableVoices = [];
-let isPageSimActive = false;
-/** @type {AudioContext|null} */
-let audioCtx = null;
-/** @type {any} */
-let speechPlaybackTimer = null;
-let currentUtteranceId = 0;
-
-document.addEventListener('DOMContentLoaded', async () => {
-  setupTabSyncListeners();
-  setupEventListeners();
-  updatePersonaUI();
-  populateVoiceSelect();
-  await restoreSavedAuditOrLoadUrl();
-});
-
-window.addEventListener('beforeunload', () => {
-  stopSequentialSpeech();
-});
-
-/**
- * View state management helpers
- */
-function showWelcomeView() {
-  document.getElementById('welcome-view')?.classList.remove('hidden');
-  document.getElementById('results-view')?.classList.add('hidden');
-  document.getElementById('scan-progress')?.classList.add('hidden');
-  document.getElementById('error-view')?.classList.add('hidden');
-}
-
-function showProgressView() {
-  document.getElementById('welcome-view')?.classList.add('hidden');
-  document.getElementById('results-view')?.classList.add('hidden');
-  document.getElementById('scan-progress')?.classList.remove('hidden');
-  document.getElementById('error-view')?.classList.add('hidden');
-}
-
-function showResultsView() {
-  document.getElementById('welcome-view')?.classList.add('hidden');
-  document.getElementById('scan-progress')?.classList.add('hidden');
-  document.getElementById('error-view')?.classList.add('hidden');
-  document.getElementById('results-view')?.classList.remove('hidden');
-}
-
-function showErrorView() {
-  document.getElementById('welcome-view')?.classList.add('hidden');
-  document.getElementById('scan-progress')?.classList.add('hidden');
-  document.getElementById('results-view')?.classList.add('hidden');
-  document.getElementById('error-view')?.classList.remove('hidden');
-}
-
-/**
- * Initializes active tab and URL synchronization listeners
- */
-function setupTabSyncListeners() {
-  // Keep current active tab and URL in sync when user switches tabs or navigates
-  if (chrome.tabs?.onActivated) {
-    chrome.tabs.onActivated.addListener(async (activeInfo) => {
-      try {
-        const tab = await chrome.tabs.get(activeInfo.tabId);
-        const tabUrl = tab?.url || tab?.pendingUrl;
-        const inputUrl = document.getElementById('input-url');
-
-        if (tab && tabUrl && isValidWebUrl(tabUrl)) {
-          currentTabId = tab.id;
-          if (inputUrl && document.activeElement !== inputUrl) {
-            // @ts-ignore
-            inputUrl.value = tabUrl;
-          }
-
-          const welcomeUrlEl = document.getElementById('welcome-url-text');
-          if (welcomeUrlEl) welcomeUrlEl.textContent = tabUrl;
-
-          // If an audit was loaded, show results only if it matches this tab's URL
-          if (currentAudit) {
-            if (urlsMatch(tabUrl, currentAudit.url)) {
-              showResultsView();
-            } else {
-              showWelcomeView();
-            }
-          }
-        } else if (tab && (!tabUrl || !isValidWebUrl(tabUrl))) {
-          if (inputUrl && document.activeElement !== inputUrl) {
-            // @ts-ignore
-            inputUrl.value = '';
-          }
-          showWelcomeView();
-        }
-      } catch (_) {}
-    });
-  }
-
-  if (chrome.tabs?.onUpdated) {
-    chrome.tabs.onUpdated.addListener((updatedTabId, changeInfo, tab) => {
-      const tabUrl = changeInfo.url || (changeInfo.status === 'complete' ? tab?.url : null);
-      if (updatedTabId === currentTabId && tabUrl) {
-        const inputUrl = document.getElementById('input-url');
-        if (isValidWebUrl(tabUrl)) {
-          if (inputUrl && document.activeElement !== inputUrl) {
-            // @ts-ignore
-            inputUrl.value = tabUrl;
-          }
-          const welcomeUrlEl = document.getElementById('welcome-url-text');
-          if (welcomeUrlEl) welcomeUrlEl.textContent = tabUrl;
-
-          if (currentAudit) {
-            if (urlsMatch(tabUrl, currentAudit.url)) {
-              showResultsView();
-            } else {
-              showWelcomeView();
-            }
-          }
-        } else {
-          if (inputUrl && document.activeElement !== inputUrl) {
-            // @ts-ignore
-            inputUrl.value = '';
-          }
-          showWelcomeView();
-        }
-      }
-    });
-  }
-}
-
-/**
- * Helper to check whether a URL is a valid web address that can be audited.
- * @param {string} [url]
- * @returns {boolean}
- */
-function isValidWebUrl(url) {
-  if (!url || typeof url !== 'string') return false;
-  return url.startsWith('http://') || url.startsWith('https://') || url.startsWith('file://');
-}
-
-/**
- * Normalizes and compares two URLs to determine if they refer to the same web page.
- * @param {string} [urlA]
- * @param {string} [urlB]
- * @returns {boolean}
- */
-function urlsMatch(urlA, urlB) {
-  if (!urlA || !urlB) return false;
-  try {
-    const a = new URL(urlA);
-    const b = new URL(urlB);
-    const pathA = (a.origin + a.pathname).replace(/\/$/, '').toLowerCase();
-    const pathB = (b.origin + b.pathname).replace(/\/$/, '').toLowerCase();
-    return pathA === pathB && a.search === b.search;
-  } catch (_) {
-    return urlA.trim().replace(/\/$/, '').toLowerCase() === urlB.trim().replace(/\/$/, '').toLowerCase();
-  }
-}
-
-/**
- * Retrieves the user's currently active web page tab in the host browser window.
- * @returns {Promise<chrome.tabs.Tab | null>}
- */
-async function getActiveWebTab() {
-  try {
-    const [currentTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (currentTab && isValidWebUrl(currentTab.url || currentTab.pendingUrl)) {
-      return currentTab;
-    }
-    const [lastFocusedTab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-    if (lastFocusedTab && isValidWebUrl(lastFocusedTab.url || lastFocusedTab.pendingUrl)) {
-      return lastFocusedTab;
-    }
-    const normalTabs = await chrome.tabs.query({ active: true, windowType: 'normal' });
-    const activeNormalTab = normalTabs.find(t => t.lastFocusedWindow) || normalTabs[0];
-    if (activeNormalTab && isValidWebUrl(activeNormalTab.url || activeNormalTab.pendingUrl)) {
-      return activeNormalTab;
-    }
-  } catch (err) {
-    console.warn('[Auditor] Could not determine active tab:', err);
-  }
-  return null;
-}
-
-/**
- * Restores previous audit from session storage (if still on the same page)
- * or autofills the URL bar with the currently active page URL.
- */
-async function restoreSavedAuditOrLoadUrl() {
-  // Always retrieve the current active tab first
-  const activeTab = await getActiveWebTab();
-  const inputUrl = document.getElementById('input-url');
-  let activeUrl = '';
-
-  if (activeTab) {
-    currentTabId = activeTab.id;
-    const rawUrl = activeTab.url || activeTab.pendingUrl;
-    if (rawUrl && isValidWebUrl(rawUrl)) {
-      activeUrl = rawUrl;
-    }
-  }
-
-  // Autofill the bar with the URL of the page you are currently on
-  if (inputUrl) {
-    // @ts-ignore
-    inputUrl.value = activeUrl || '';
-  }
-
-  const welcomeUrlEl = document.getElementById('welcome-url-text');
-  if (welcomeUrlEl) {
-    welcomeUrlEl.textContent = activeUrl || 'Detecting active browser tab...';
-  }
-
-  // If there's a saved audit, check if it matches the current page URL
-  try {
-    const storageArea = chrome.storage?.session || chrome.storage?.local;
-    if (storageArea) {
-      const saved = await storageArea.get(['currentAudit', 'currentFilter', 'currentTabId', 'lastUrl']);
-      const savedAuditUrl = saved?.currentAudit?.url || saved?.lastUrl;
-
-      // Only restore previous audit results if the user is still on that same audited page
-      if (saved && saved.currentAudit && activeUrl && savedAuditUrl && urlsMatch(activeUrl, savedAuditUrl)) {
-        currentAudit = saved.currentAudit;
-        currentFilter = saved.currentFilter || 'all';
-        if (saved.currentTabId) currentTabId = saved.currentTabId;
-
-        renderScorecard(currentAudit);
-        renderIssuesList();
-
-        showResultsView();
-        return;
-      } else {
-        // Different page or new tab: clear stale audit view so fresh page is ready to audit
-        currentAudit = null;
-        showWelcomeView();
-      }
-    }
-  } catch (err) {
-    console.warn('[Auditor] Could not restore saved audit:', err);
-    showWelcomeView();
-  }
-}
-
-/**
- * Pre-populates URL input with current active tab URL
- */
-async function loadActiveTabUrl() {
-  const activeTab = await getActiveWebTab();
-  if (activeTab) {
-    currentTabId = activeTab.id;
-    const rawUrl = activeTab.url || activeTab.pendingUrl;
-    if (rawUrl && isValidWebUrl(rawUrl)) {
-      const inputUrl = document.getElementById('input-url');
-      if (inputUrl) {
-        // @ts-ignore
-        inputUrl.value = rawUrl;
-      }
-    }
-  }
-}
-
-function setupEventListeners() {
-  const form = document.getElementById('audit-form');
-  form?.addEventListener('submit', (e) => {
-    e.preventDefault();
-    // @ts-ignore
-    const url = document.getElementById('input-url')?.value.trim();
-    if (url) runAudit(url);
-  });
-
-  // Welcome State Quick-Scan CTA Button (fallback if outside form)
-  document.getElementById('btn-welcome-scan')?.addEventListener('click', (e) => {
-    // If inside a form, submit event handles it
-    if (form) return;
-    // @ts-ignore
-    const url = document.getElementById('input-url')?.value.trim();
-    if (url) runAudit(url);
-  });
-
-  // Return to audit screen for a new URL
-  document.getElementById('btn-new-audit')?.addEventListener('click', () => {
-    showWelcomeView();
-    const inputUrl = document.getElementById('input-url');
-    if (inputUrl) {
-      inputUrl.focus();
-      // @ts-ignore
-      if (typeof inputUrl.select === 'function') inputUrl.select();
-    }
-  });
-
-  // Vision Simulation Suite Collapsible Drawer Toggle
-  const cvdHeader = document.getElementById('cvd-header-toggle');
-  const cvdToggleBtn = document.getElementById('cvd-toggle-btn');
-  const cvdBody = document.getElementById('cvd-panel-body');
-
-  const toggleCvdPanel = () => {
-    if (!cvdBody) return;
-    const isHidden = cvdBody.classList.toggle('hidden');
-    if (cvdToggleBtn) {
-      cvdToggleBtn.textContent = isHidden ? '▼ Open Lenses' : '▲ Close Lenses';
-    }
+  /* ------------------------------------------------------------------------
+     State
+     ------------------------------------------------------------------------ */
+  const state = {
+    view: 'welcome',
+    tabId: null,
+    tabUrl: '',
+    windowId: null,
+    runId: 0,
+    lastUrl: '',
+    result: null,
+    fileAccess: null,
+    // WCAG drawer
+    search: '',
+    sevFilter: new Set(IMPACTS),
+    openIssues: new Set(),
+    openNodes: new Set(),
+    nodeLimit: {},
+    previews: new Set(),
+    openSections: new Set(),
+    // Mobile drawer
+    deviceId: DEVICES[0].id,
+    orientation: 'portrait',
+    mobileAnalysisByDevice: {},
+    simMeta: {},
+    mobileSimActive: false,
+    deviceWindowId: null,
+    // Screen reader drawer
+    persona: 'voiceover',
+    hudActive: false,
+    skipHidden: true,
+    // Tab drawer
+    tabTrail: false,
+    lineStyle: 'straight',
+    focusedTab: null,
+    // Live page updates (CONTRACT §10.4); null = use the audit snapshot
+    live: { tabOrder: null, sequence: null, barrierCount: 0, tabAt: null, srAt: null },
+    // Vision
+    lens: 'none',
+    // Links
+    linkFilter: 'all'
   };
 
-  cvdHeader?.addEventListener('click', () => {
-    toggleCvdPanel();
-  });
-  cvdToggleBtn?.addEventListener('click', (e) => {
-    e.stopPropagation();
-    toggleCvdPanel();
-  });
+  /* ------------------------------------------------------------------------
+     DOM helpers
+     ------------------------------------------------------------------------ */
+  const $ = (id) => document.getElementById(id);
 
-  // WCAG Issues Table Collapsible Drawer Toggle
-  const issuesHeader = document.getElementById('issues-header-toggle');
-  const issuesToggleBtn = document.getElementById('issues-toggle-btn');
-  const issuesBody = document.getElementById('issues-panel-body');
-
-  const toggleIssuesPanel = () => {
-    if (!issuesBody) return;
-    const isHidden = issuesBody.classList.toggle('hidden');
-    if (issuesToggleBtn) {
-      issuesToggleBtn.textContent = isHidden ? '▼ View Issues' : '▲ Hide Issues';
-    }
-  };
-
-  issuesHeader?.addEventListener('click', () => {
-    toggleIssuesPanel();
-  });
-  issuesToggleBtn?.addEventListener('click', (e) => {
-    e.stopPropagation();
-    toggleIssuesPanel();
-  });
-
-  // Executive Failure KPI Cards Drawer Jump
-  document.querySelectorAll('.failure-kpi-card').forEach((pill) => {
-    pill.addEventListener('click', () => {
-      const targetId = pill.getAttribute('data-target');
-      if (!targetId) return;
-      const targetSec = document.getElementById(targetId);
-      if (!targetSec) return;
-
-      // Automatically expand target drawer if currently collapsed
-      if (targetId === 'section-issues') {
-        const b = document.getElementById('issues-panel-body');
-        if (b && b.classList.contains('hidden')) {
-          b.classList.remove('hidden');
-          const t = document.getElementById('issues-toggle-btn');
-          if (t) t.textContent = '▲ Hide Issues';
-        }
-      } else if (targetId === 'section-links') {
-        const b = document.getElementById('link-checker-panel-body');
-        if (b && b.classList.contains('hidden')) {
-          b.classList.remove('hidden');
-          const t = document.getElementById('link-checker-toggle-btn');
-          if (t) t.textContent = '▲ Hide Links';
-        }
-      } else if (targetId === 'section-tabs') {
-        const b = document.getElementById('tab-order-panel-body');
-        if (b && b.classList.contains('hidden')) {
-          b.classList.remove('hidden');
-          const t = document.getElementById('tab-order-toggle-btn');
-          if (t) t.textContent = '▲ Hide Sequence';
-        }
-      } else if (targetId === 'section-sr') {
-        const b = document.getElementById('sr-panel-body');
-        if (b && b.classList.contains('hidden')) {
-          b.classList.remove('hidden');
-          const t = document.getElementById('sr-toggle-btn');
-          if (t) t.textContent = '▲ Hide Readout';
-        }
-      } else if (targetId === 'section-cvd') {
-        const b = document.getElementById('cvd-panel-body');
-        if (b && b.classList.contains('hidden')) {
-          b.classList.remove('hidden');
-          const t = document.getElementById('cvd-toggle-btn');
-          if (t) t.textContent = '▲ Close Lenses';
-        }
+  function h(tag, props, ...kids) {
+    const el = document.createElement(tag);
+    if (props) {
+      for (const [k, v] of Object.entries(props)) {
+        if (v == null || v === false) continue;
+        if (k === 'class') el.className = v;
+        else if (k === 'text') el.textContent = v;
+        else if (k === 'dataset') Object.assign(el.dataset, v);
+        else if (k === 'style' && typeof v === 'object') Object.assign(el.style, v);
+        else if (k.startsWith('on') && typeof v === 'function') el.addEventListener(k.slice(2), v);
+        else el.setAttribute(k, v === true ? '' : String(v));
       }
-
-      // Smooth scroll to section
-      targetSec.scrollIntoView({ behavior: 'smooth', block: 'start' });
-
-      // Pulse highlight animation
-      targetSec.classList.remove('section-pulse');
-      void targetSec.offsetWidth; // Force reflow
-      targetSec.classList.add('section-pulse');
-      setTimeout(() => targetSec.classList.remove('section-pulse'), 1400);
-    });
-  });
-
-  // Bulk Drawer Controls: Expand All / Collapse All
-  document.getElementById('btn-expand-all')?.addEventListener('click', () => {
-    const bodies = [
-      { id: 'issues-panel-body', btn: 'issues-toggle-btn', text: '▲ Hide Issues' },
-      { id: 'link-checker-panel-body', btn: 'link-checker-toggle-btn', text: '▲ Hide Links' },
-      { id: 'tab-order-panel-body', btn: 'tab-order-toggle-btn', text: '▲ Hide Sequence' },
-      { id: 'sr-panel-body', btn: 'sr-toggle-btn', text: '▲ Hide Readout' },
-    ];
-    bodies.forEach(({ id, btn, text }) => {
-      const el = document.getElementById(id);
-      if (el) el.classList.remove('hidden');
-      const b = document.getElementById(btn);
-      if (b) b.textContent = text;
-    });
-  });
-
-  document.getElementById('btn-collapse-all')?.addEventListener('click', () => {
-    const bodies = [
-      { id: 'issues-panel-body', btn: 'issues-toggle-btn', text: '▼ View Issues' },
-      { id: 'link-checker-panel-body', btn: 'link-checker-toggle-btn', text: '▼ View Links' },
-      { id: 'tab-order-panel-body', btn: 'tab-order-toggle-btn', text: '▼ View Sequence' },
-      { id: 'sr-panel-body', btn: 'sr-toggle-btn', text: '▼ View Readout' },
-      { id: 'cvd-panel-body', btn: 'cvd-toggle-btn', text: '▼ Open Lenses' },
-    ];
-    bodies.forEach(({ id, btn, text }) => {
-      const el = document.getElementById(id);
-      if (el) el.classList.add('hidden');
-      const b = document.getElementById(btn);
-      if (b) b.textContent = text;
-    });
-  });
-
-  // Severity Filter Tabs
-  document.querySelectorAll('.filter-btn').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      document.querySelectorAll('.filter-btn').forEach((b) => b.classList.remove('active'));
-      btn.classList.add('active');
-      currentFilter = btn.getAttribute('data-filter') || 'all';
-      renderIssuesList();
-    });
-  });
-
-  // Screen Reader Drawer Toggle
-  const srHeader = document.getElementById('sr-header-toggle');
-  const srToggleBtn = document.getElementById('sr-toggle-btn');
-  const srBody = document.getElementById('sr-panel-body');
-  
-  const toggleSrPanel = () => {
-    if (!srBody) return;
-    const isHidden = srBody.classList.toggle('hidden');
-    if (srToggleBtn) {
-      srToggleBtn.textContent = isHidden ? '▼ View Readout' : '▲ Hide Readout';
     }
-  };
+    appendKids(el, kids);
+    return el;
+  }
+  function appendKids(el, kids) {
+    for (const kid of kids) {
+      if (kid == null || kid === false) continue;
+      if (Array.isArray(kid)) appendKids(el, kid);
+      else el.append(kid instanceof Node ? kid : document.createTextNode(String(kid)));
+    }
+  }
+  function clear(el) { while (el.firstChild) el.removeChild(el.firstChild); return el; }
+  function svg(tag, attrs) {
+    const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
+    for (const [k, v] of Object.entries(attrs || {})) el.setAttribute(k, String(v));
+    return el;
+  }
+  const arr = (v) => (Array.isArray(v) ? v : []);
+  const num = (v, d = 0) => (typeof v === 'number' && isFinite(v) ? v : d);
+  const plural = (n, one, many) => `${n} ${n === 1 ? one : (many || one + 's')}`;
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const errMsg = (e) => (e && e.message ? e.message : String(e == null ? 'Unknown error' : e));
 
-  srHeader?.addEventListener('click', (e) => {
-    toggleSrPanel();
-  });
-  srToggleBtn?.addEventListener('click', (e) => {
-    e.stopPropagation();
-    toggleSrPanel();
-  });
+  /* ------------------------------------------------------------------------
+     Announcements (polite live region) + visual toast
+     ------------------------------------------------------------------------ */
+  let liveTimer = null;
+  function announce(msg) {
+    const live = $('af-live');
+    if (!live) return;
+    live.textContent = '';
+    clearTimeout(liveTimer);
+    liveTimer = setTimeout(() => { live.textContent = msg; }, 60);
+  }
+  let toastTimer = null;
+  function toast(msg) {
+    const t = $('toast');
+    t.textContent = msg;
+    t.classList.add('is-visible');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => t.classList.remove('is-visible'), 2600);
+    announce(msg);
+  }
 
-  /**
-   * Helper: Loads an image source into an Image object
-   * @param {string} src
-   * @returns {Promise<HTMLImageElement|null>}
-   */
-  function loadHtmlImage(src) {
+  /* ------------------------------------------------------------------------
+     Chrome API wrappers
+     ------------------------------------------------------------------------ */
+  const hasChrome = typeof chrome !== 'undefined' && chrome;
+
+  async function getActiveTab() {
+    try {
+      const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+      return tabs && tabs[0] ? tabs[0] : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function fileSchemeAllowed() {
     return new Promise((resolve) => {
-      if (!src) return resolve(null);
-      const img = new Image();
-      img.onload = () => resolve(img);
-      img.onerror = () => resolve(null);
-      img.src = src;
+      try {
+        if (!hasChrome || !chrome.extension || !chrome.extension.isAllowedFileSchemeAccess) return resolve(true);
+        const maybe = chrome.extension.isAllowedFileSchemeAccess((allowed) => resolve(!!allowed));
+        if (maybe && typeof maybe.then === 'function') maybe.then((a) => resolve(!!a), () => resolve(true));
+      } catch (e) {
+        resolve(true);
+      }
     });
+  }
+
+  async function sendMessage(msg) {
+    try {
+      const res = await chrome.runtime.sendMessage(msg);
+      return res || { ok: false, error: 'No response from the background service worker.' };
+    } catch (e) {
+      return { ok: false, error: errMsg(e) };
+    }
+  }
+
+  function withTimeout(promise, ms, label) {
+    let t;
+    const timeout = new Promise((_, reject) => {
+      t = setTimeout(() => {
+        const e = new Error(`${label} timed out after ${Math.round(ms / 1000)}s.`);
+        e.code = 'timeout';
+        reject(e);
+      }, ms);
+    });
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(t));
+  }
+
+  function injectEngine(tabId) {
+    return chrome.scripting.executeScript({ target: { tabId }, files: INJECT_FILES });
+  }
+
+  /* Runs window[name](...args) in the page. Self-contained: serialised by
+     chrome.scripting, so it must not reference anything outside itself. */
+  async function afPageCall(name, args) {
+    const fn = window[name];
+    if (typeof fn !== 'function') return { __afMissing: true };
+    try {
+      const r = await fn.apply(window, args || []);
+      if (r === undefined || r === null) return { ok: true };
+      if (typeof r !== 'object') return { ok: true, value: r };
+      return r;
+    } catch (e) {
+      return { ok: false, error: String((e && e.message) || e) };
+    }
   }
 
   /**
-   * Crops a centered, focused thumbnail of an issue location from a full or partial screenshot.
-   * Ensures the focal element (text, heading, button, or input) is centered in the canvas
-   * with balanced surrounding padding and a crisp failure highlight box.
+   * Safe wrapper for every overlay/engine call in the target tab.
+   * Never throws. If the API is missing (page navigated, fresh document),
+   * re-injects the engine files and retries once.
    */
-  function cropFocalThumbnail(img, focalRect, viewportW, viewportH) {
-    if (!img || !img.naturalWidth || !img.naturalHeight || !focalRect) return null;
-    if (focalRect.width <= 0 || focalRect.height <= 0) return null;
-
-    const vW = Math.max(320, viewportW || 1280);
-    const vH = Math.max(320, viewportH || 800);
-    const dpr = img.naturalWidth / vW || 1;
-
-    // Focal element center coordinates in viewport CSS pixels
-    const fCenterX = focalRect.left + focalRect.width / 2;
-    const fCenterY = focalRect.top + focalRect.height / 2;
-
-    // Desired crop dimensions in CSS pixels (generous context without squashing)
-    const targetCropW = Math.max(focalRect.width + 100, 440);
-    const targetCropH = Math.max(focalRect.height + 65, 150);
-
-    const cropW = Math.min(vW, targetCropW);
-    const cropH = Math.min(vH, targetCropH);
-
-    // Center the crop window around the focal point
-    let cropX = fCenterX - cropW / 2;
-    let cropY = fCenterY - cropH / 2;
-
-    // Keep crop window strictly inside the viewport bounds
-    if (cropX < 0) cropX = 0;
-    if (cropX + cropW > vW) cropX = Math.max(0, vW - cropW);
-    if (cropY < 0) cropY = 0;
-    if (cropY + cropH > vH) cropY = Math.max(0, vH - cropH);
-
-    // Convert CSS coordinates to physical image pixels
-    const sx = Math.max(0, Math.min(img.naturalWidth - 1, Math.round(cropX * dpr)));
-    const sy = Math.max(0, Math.min(img.naturalHeight - 1, Math.round(cropY * dpr)));
-    const sw = Math.max(10, Math.min(img.naturalWidth - sx, Math.round(cropW * dpr)));
-    const sh = Math.max(10, Math.min(img.naturalHeight - sy, Math.round(cropH * dpr)));
-
-    if (sw < 10 || sh < 10) return null;
-
-    // Create high-res canvas (440px max width maintains sharp text in PDF)
-    const canvas = document.createElement('canvas');
-    const maxCanvasW = 440;
-    const maxCanvasH = 180;
-    const aspect = sw / sh;
-    let dw = maxCanvasW;
-    let dh = dw / aspect;
-    if (dh > maxCanvasH) {
-      dh = maxCanvasH;
-      dw = dh * aspect;
-    }
-    canvas.width = Math.round(dw);
-    canvas.height = Math.round(dh);
-
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return null;
-
-    // Draw the cropped region
-    ctx.drawImage(img, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
-
-    // Relative coordinates of focal element in the cropped image
-    const actualCropX = sx / dpr;
-    const actualCropY = sy / dpr;
-    const actualCropW = sw / dpr;
-    const actualCropH = sh / dpr;
-
-    const scaleX = canvas.width / actualCropW;
-    const scaleY = canvas.height / actualCropH;
-
-    const highlightX = Math.round((focalRect.left - actualCropX) * scaleX);
-    const highlightY = Math.round((focalRect.top - actualCropY) * scaleY);
-    const highlightW = Math.round(focalRect.width * scaleX);
-    const highlightH = Math.round(focalRect.height * scaleY);
-
-    // Draw subtle failure highlight tint & crisp red stroke around offending control
-    ctx.fillStyle = 'rgba(239, 68, 68, 0.12)';
-    ctx.fillRect(highlightX, highlightY, highlightW, highlightH);
-    ctx.strokeStyle = '#ef4444';
-    ctx.lineWidth = 2.5;
-    ctx.strokeRect(highlightX, highlightY, highlightW, highlightH);
-
-    return {
-      dataUrl: canvas.toDataURL('image/png'),
-      width: canvas.width,
-      height: canvas.height,
+  async function callPage(name, args = [], opts = {}) {
+    const tabId = state.tabId;
+    if (tabId == null) return { ok: false, error: 'No audited tab.' };
+    const run = async () => {
+      const res = await chrome.scripting.executeScript({ target: { tabId }, func: afPageCall, args: [name, args] });
+      return res && res[0] ? res[0].result : undefined;
     };
-  }
-
-  /**
-   * Generates visual thumbnails of failing elements from the page screenshot.
-   * Handles elements both in the current viewport and scrolled down the page,
-   * centering precisely on the focal issue (text, button, or input) and avoiding
-   * squashing or distorting oversized containers.
-   * @param {Object} audit
-   */
-  async function generateElementThumbnails(audit) {
-    if (!audit || !audit.violations) return;
-
-    let tab = null;
     try {
-      tab = await getActiveWebTab();
-    } catch (_) {}
-
-    // Collect failing nodes that need visual thumbnails
-    // Skip page-level targets like html, body, :root
-    const nodesToCapture = [];
-    for (const v of audit.violations || []) {
-      for (const node of (v.nodes || []).slice(0, 4)) {
-        const target = String(node.target || '').toLowerCase().trim();
-        if (target === 'html' || target === 'body' || target === ':root' || !target) continue;
-        if (!node.screenshot) {
-          nodesToCapture.push(node);
-        }
+      let out = await run();
+      if (out && out.__afMissing && opts.reinject !== false) {
+        await injectEngine(tabId);
+        out = await run();
       }
-    }
-
-    if (nodesToCapture.length === 0) return;
-
-    // Phase 1: Try live tab scrolling and capturing if tab is accessible
-    if (tab?.id && chrome.scripting?.executeScript && chrome.tabs?.captureVisibleTab) {
-      try {
-        // Record original user scroll position so we can restore it completely
-        const [origScrollRes] = await chrome.scripting.executeScript({
-          target: { tabId: tab.id },
-          func: () => ({ x: window.scrollX, y: window.scrollY }),
-        });
-        const origScroll = origScrollRes?.result || { x: 0, y: 0 };
-
-        try {
-          // Capture current visible tab first
-          let currentShot = null;
-          try {
-            currentShot = await chrome.tabs.captureVisibleTab(null, { format: 'png' });
-          } catch (_) {}
-
-          let loadedCurrentImg = currentShot ? await loadHtmlImage(currentShot) : null;
-          let lastCaptureTime = Date.now();
-          let scrollCapturesDone = 0;
-
-          for (const node of nodesToCapture) {
-            if (node.screenshot) continue;
-
-            // Query element and focal bounds in active tab
-            const [infoRes] = await chrome.scripting.executeScript({
-              target: { tabId: tab.id },
-              args: [node.target],
-              func: (selector) => {
-                let el = null;
-                try { el = document.querySelector(selector); } catch (_) {}
-                if (!el && selector.includes('#')) {
-                  const idMatch = selector.match(/#([a-zA-Z0-9_-]+)/);
-                  if (idMatch) el = document.getElementById(idMatch[1]);
-                }
-                if (!el) return null;
-
-                // Resolve visual target for off-screen/hidden inputs
-                const r = el.getBoundingClientRect();
-                let visualEl = el;
-                if (r.width <= 2 || r.height <= 2 || r.left < -20 || r.top < -20) {
-                  if (el.labels && el.labels.length > 0) {
-                    visualEl = el.labels[0];
-                  } else if (el.closest('label')) {
-                    visualEl = el.closest('label');
-                  } else if (el.closest('.form-check, .radio-card, .option-card, .field-wrapper')) {
-                    visualEl = el.closest('.form-check, .radio-card, .option-card, .field-wrapper');
-                  }
-                }
-
-                // Check for compact content child inside wide containers
-                let focalEl = visualEl;
-                const vr = visualEl.getBoundingClientRect();
-                if (vr.width > 450) {
-                  const contentChild = visualEl.querySelector(
-                    'button, h1, h2, h3, h4, h5, h6, [role="heading"], [role="button"], label, input, select, textarea, a, .accordion-title, .card-title, .title, p, span, strong, b'
-                  );
-                  if (contentChild) {
-                    const cr = contentChild.getBoundingClientRect();
-                    if (cr.width > 10 && cr.height > 10 && cr.width < vr.width) {
-                      focalEl = contentChild;
-                    }
-                  }
-                }
-
-                const fr = focalEl.getBoundingClientRect();
-                const inVp = fr.top >= 30 && fr.bottom <= (window.innerHeight - 30) && fr.left >= 0 && fr.right <= window.innerWidth;
-
-                return {
-                  inViewport: inVp,
-                  rect: {
-                    left: Math.round(fr.left),
-                    top: Math.round(fr.top),
-                    width: Math.round(fr.width),
-                    height: Math.round(fr.height),
-                  },
-                  viewport: {
-                    width: window.innerWidth,
-                    height: window.innerHeight,
-                    dpr: window.devicePixelRatio || 1,
-                  }
-                };
-              }
-            });
-
-            const focalInfo = infoRes?.result;
-            if (!focalInfo) continue;
-
-            // If it is in the current viewport and we have a valid screenshot, crop directly!
-            if (focalInfo.inViewport && loadedCurrentImg) {
-              const res = cropFocalThumbnail(loadedCurrentImg, focalInfo.rect, focalInfo.viewport.width, focalInfo.viewport.height);
-              if (res) {
-                node.screenshot = res.dataUrl;
-                node.screenshotWidth = res.width;
-                node.screenshotHeight = res.height;
-                continue;
-              }
-            }
-
-            // If we have already done 5 scroll captures, stop to keep PDF export snappy
-            if (scrollCapturesDone >= 5) continue;
-
-            // Element is offscreen or not in current viewport -> Scroll it into view!
-            await chrome.scripting.executeScript({
-              target: { tabId: tab.id },
-              args: [node.target],
-              func: (selector) => {
-                let el = null;
-                try { el = document.querySelector(selector); } catch (_) {}
-                if (!el && selector.includes('#')) {
-                  const idMatch = selector.match(/#([a-zA-Z0-9_-]+)/);
-                  if (idMatch) el = document.getElementById(idMatch[1]);
-                }
-                if (el && typeof el.scrollIntoView === 'function') {
-                  el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
-                }
-              }
-            });
-
-            // Respect Chrome captureVisibleTab rate limit (max 2 calls per second)
-            const elapsed = Date.now() - lastCaptureTime;
-            if (elapsed < 500) {
-              await new Promise(r => setTimeout(r, 500 - elapsed));
-            }
-
-            // Capture new viewport
-            let scrolledShot = null;
-            try {
-              scrolledShot = await chrome.tabs.captureVisibleTab(null, { format: 'png' });
-              lastCaptureTime = Date.now();
-              scrollCapturesDone++;
-            } catch (capErr) {
-              console.warn('[Auditor] captureVisibleTab throttled/failed:', capErr);
-              break;
-            }
-
-            if (!scrolledShot) continue;
-
-            // Re-fetch focal position now that it is centered in the viewport
-            const [scrolledInfoRes] = await chrome.scripting.executeScript({
-              target: { tabId: tab.id },
-              args: [node.target],
-              func: (selector) => {
-                let el = null;
-                try { el = document.querySelector(selector); } catch (_) {}
-                if (!el && selector.includes('#')) {
-                  const idMatch = selector.match(/#([a-zA-Z0-9_-]+)/);
-                  if (idMatch) el = document.getElementById(idMatch[1]);
-                }
-                if (!el) return null;
-
-                let visualEl = el;
-                const r = el.getBoundingClientRect();
-                if (r.width <= 2 || r.height <= 2 || r.left < -20 || r.top < -20) {
-                  if (el.labels && el.labels.length > 0) {
-                    visualEl = el.labels[0];
-                  } else if (el.closest('label')) {
-                    visualEl = el.closest('label');
-                  }
-                }
-
-                let focalEl = visualEl;
-                const vr = visualEl.getBoundingClientRect();
-                if (vr.width > 450) {
-                  const contentChild = visualEl.querySelector(
-                    'button, h1, h2, h3, h4, h5, h6, [role="heading"], [role="button"], label, input, select, textarea, a, .accordion-title, .card-title, .title, p, span, strong, b'
-                  );
-                  if (contentChild) {
-                    const cr = contentChild.getBoundingClientRect();
-                    if (cr.width > 10 && cr.height > 10 && cr.width < vr.width) {
-                      focalEl = contentChild;
-                    }
-                  }
-                }
-
-                const fr = focalEl.getBoundingClientRect();
-                return {
-                  rect: {
-                    left: Math.round(fr.left),
-                    top: Math.round(fr.top),
-                    width: Math.round(fr.width),
-                    height: Math.round(fr.height),
-                  },
-                  viewport: {
-                    width: window.innerWidth,
-                    height: window.innerHeight,
-                    dpr: window.devicePixelRatio || 1,
-                  }
-                };
-              }
-            });
-
-            const scrolledFocal = scrolledInfoRes?.result;
-            if (scrolledFocal) {
-              const scrolledImg = await loadHtmlImage(scrolledShot);
-              if (scrolledImg) {
-                loadedCurrentImg = scrolledImg; // update for subsequent nodes
-                const res = cropFocalThumbnail(scrolledImg, scrolledFocal.rect, scrolledFocal.viewport.width, scrolledFocal.viewport.height);
-                if (res) {
-                  node.screenshot = res.dataUrl;
-                  node.screenshotWidth = res.width;
-                  node.screenshotHeight = res.height;
-                }
-              }
-            }
-          }
-        } finally {
-          // Restore original user scroll position
-          await chrome.scripting.executeScript({
-            target: { tabId: tab.id },
-            args: [origScroll.x, origScroll.y],
-            func: (x, y) => window.scrollTo(x, y),
-          }).catch(() => {});
-        }
-      } catch (liveErr) {
-        console.warn('[Auditor] Live scroll thumbnail generation fallback:', liveErr);
-      }
-    }
-
-    // Phase 2: Fallback for any remaining uncaptured nodes using audit.pageScreenshot
-    const pageShot = audit.pageScreenshot || audit.screenshot;
-    if (pageShot) {
-      let pageImg = null;
-      try {
-        pageImg = await loadHtmlImage(pageShot);
-      } catch (_) {}
-
-      if (pageImg && pageImg.naturalWidth && pageImg.naturalHeight) {
-        let tabWidth = 1280;
-        let tabHeight = 800;
-        if (tab?.width) tabWidth = tab.width;
-
-        for (const node of nodesToCapture) {
-          if (node.screenshot) continue;
-          const targetRect = node.focalRect || node.rect;
-          if (targetRect && targetRect.width > 0 && targetRect.height > 0) {
-            let adjustedRect = { ...targetRect };
-            if (adjustedRect.width > 450) {
-              adjustedRect.width = 400;
-            }
-            const res = cropFocalThumbnail(pageImg, adjustedRect, tabWidth, tabHeight);
-            if (res) {
-              node.screenshot = res.dataUrl;
-              node.screenshotWidth = res.width;
-              node.screenshotHeight = res.height;
-            }
-          }
-        }
-      }
+      if (out && out.__afMissing) return { ok: false, missing: true, error: `${name} is not available on this page.` };
+      if (out == null) return { ok: true };
+      return out;
+    } catch (e) {
+      return { ok: false, error: errMsg(e) };
     }
   }
 
-  // Export PDF Button
-  document.getElementById('btn-export-pdf')?.addEventListener('click', async () => {
-    if (!currentAudit) return;
+  /* ------------------------------------------------------------------------
+     URL classification
+     ------------------------------------------------------------------------ */
+  function normalizeUrl(raw) {
+    let v = String(raw || '').trim();
+    if (!v) return '';
+    if (!/^[a-z][a-z0-9+.-]*:/i.test(v)) v = 'https://' + v;
+    try { return new URL(v).href; } catch (e) { return ''; }
+  }
+  function sameUrl(a, b) {
+    if (!a || !b) return false;
+    try { return new URL(a).href === new URL(b).href; } catch (e) { return a === b; }
+  }
+  function classifyUrl(url) {
+    const u = String(url || '').toLowerCase();
+    if (!u) return 'empty';
+    if (/^(chrome|edge|brave|opera|vivaldi|about|chrome-extension|extension|edge-extension|moz-extension|devtools|view-source|chrome-search|chrome-untrusted|chrome-error):/.test(u)) return 'restricted';
+    if (/^https?:\/\/(chrome\.google\.com\/webstore|chromewebstore\.google\.com|microsoftedge\.microsoft\.com\/addons)/.test(u)) return 'restricted';
+    if (u.startsWith('file:')) return 'file';
+    if (/^https?:/.test(u)) return 'web';
+    return 'unsupported';
+  }
+
+  /* ------------------------------------------------------------------------
+     Views
+     ------------------------------------------------------------------------ */
+  const VIEWS = ['welcome', 'progress', 'results', 'error'];
+  function showView(name, { focus = true } = {}) {
+    state.view = name;
+    VIEWS.forEach((v) => { $(`${v}-view`).hidden = v !== name; });
+    window.scrollTo(0, 0);
+    if (focus) {
+      const title = { welcome: 'welcome-title', progress: 'progress-title', results: 'results-title', error: 'error-title' }[name];
+      const t = $(title);
+      if (t) t.focus({ preventScroll: true });
+    }
+  }
+
+  /* ------------------------------------------------------------------------
+     Welcome
+     ------------------------------------------------------------------------ */
+  async function refreshTargetFromTab() {
+    const tab = await getActiveTab();
+    if (!tab) return;
+    state.tabId = tab.id;
+    state.tabUrl = tab.url || '';
+    state.windowId = tab.windowId != null ? tab.windowId : null;
+    const input = $('target-url');
+    if (document.activeElement !== input || !input.value) input.value = tab.url || '';
+    updateFileBanner();
+  }
+
+  async function updateFileBanner() {
+    const url = normalizeUrl($('target-url').value);
+    if (classifyUrl(url) !== 'file') { $('file-banner').hidden = true; return; }
+    if (state.fileAccess == null) state.fileAccess = await fileSchemeAllowed();
+    $('file-banner').hidden = !!state.fileAccess;
+  }
+
+  function setUrlError(msg) {
+    const input = $('target-url');
+    const err = $('target-url-error');
+    if (msg) {
+      err.textContent = msg;
+      err.hidden = false;
+      input.setAttribute('aria-invalid', 'true');
+      input.focus();
+    } else {
+      err.hidden = true;
+      err.textContent = '';
+      input.removeAttribute('aria-invalid');
+    }
+  }
+
+  function openExtensionSettings() {
+    const id = hasChrome && chrome.runtime ? chrome.runtime.id : '';
     try {
-      const btn = document.getElementById('btn-export-pdf');
-      if (btn) btn.textContent = 'Generating PDF...';
-
-      // Capture active tab screenshot if available
-      if (chrome.tabs?.captureVisibleTab) {
-        try {
-          const tabShot = await chrome.tabs.captureVisibleTab(null, { format: 'png' });
-          if (tabShot) {
-            currentAudit.pageScreenshot = tabShot;
-          }
-        } catch (shotErr) {
-          console.warn('[Auditor] captureVisibleTab failed:', shotErr);
-        }
-      }
-
-      await generateElementThumbnails(currentAudit);
-
-      // @ts-ignore
-      await window.generateWcagPdfReport(currentAudit);
-      if (btn) {
-        btn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg> <span>Export PDF Report</span>';
-      }
-    } catch (err) {
-      console.error('PDF Generation failed:', err);
-      alert(`Failed to generate PDF: ${err.message}`);
-      const btn = document.getElementById('btn-export-pdf');
-      if (btn) {
-        btn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg> <span>Export PDF Report</span>';
-      }
+      chrome.tabs.create({ url: `chrome://extensions/?id=${id}` });
+    } catch (e) {
+      toast('Open chrome://extensions, find Mattccessibility Tool and choose Details.');
     }
-  });
+  }
 
-  // Screen Reader Persona Tabs (iOS VoiceOver, Android TalkBack, NVDA, Windows Narrator)
-  document.querySelectorAll('.sr-persona-btn').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      stopSequentialSpeech();
-      document.querySelectorAll('.sr-persona-btn').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      currentPersona = btn.getAttribute('data-persona') || 'ios-voiceover';
-      updatePersonaUI();
-      const cfg = PERSONA_CONFIG[currentPersona] || PERSONA_CONFIG['ios-voiceover'];
-      updateCaptionDisplay(`Emulating ${cfg.name}. Syntax: ${cfg.formula}`, false);
-      renderSpeechTimeline(currentAudit?.speechSequence || []);
+  /* ------------------------------------------------------------------------
+     Progress
+     ------------------------------------------------------------------------ */
+  const STEP_PCT = [8, 30, 60, 90];
+  function setStep(index, status, detail) {
+    const steps = document.querySelectorAll('#progress-steps .step');
+    steps.forEach((li, i) => {
+      const s = li.querySelector('.step-state');
+      if (i < index) {
+        if (!li.classList.contains('is-skipped')) li.className = 'step is-done';
+        s.textContent = li.classList.contains('is-skipped') ? ' (skipped)' : ' (done)';
+        li.removeAttribute('aria-current');
+      } else if (i === index) {
+        li.className = `step ${status === 'error' ? 'is-error' : status === 'skipped' ? 'is-skipped' : 'is-active'}`;
+        s.textContent = status === 'error' ? ' (failed)' : status === 'skipped' ? ' (skipped)' : ' (in progress)';
+        if (status === 'active') li.setAttribute('aria-current', 'step');
+        else li.removeAttribute('aria-current');
+      } else {
+        li.className = 'step';
+        s.textContent = ' (pending)';
+        li.removeAttribute('aria-current');
+      }
     });
-  });
-
-  // Emulated gestures & action buttons in popup HUD
-  document.getElementById('btn-emulate-prev')?.addEventListener('click', () => {
-    stepSequentialSpeech(-1);
-  });
-  document.getElementById('btn-emulate-next')?.addEventListener('click', () => {
-    stepSequentialSpeech(1);
-  });
-  document.getElementById('btn-emulate-activate')?.addEventListener('click', async () => {
-    const filtered = getFilteredSpeechSequence();
-    if (!filtered || speechStepIndex < 0 || speechStepIndex >= filtered.length) return;
-    const step = filtered[speechStepIndex];
-    if (!step || !step.selector) return;
-    playEarcon('control', currentPersona);
-    const activeTab = await getActiveWebTab();
-    if (activeTab?.id) {
-      await chrome.scripting.executeScript({
-        target: { tabId: activeTab.id },
-        func: (sel) => {
-          const el = document.querySelector(sel);
-          if (el) {
-            if (el.tagName.toLowerCase() === 'input' && (el.type === 'checkbox' || el.type === 'radio')) {
-              // @ts-ignore
-              el.checked = !el.checked;
-              el.dispatchEvent(new Event('change', { bubbles: true }));
-            } else if (typeof el.click === 'function') {
-              el.click();
-            }
-          }
-        },
-        args: [step.selector],
-      });
+    const pct = status === 'complete' ? 100 : STEP_PCT[index] || 0;
+    $('progress-fill').style.width = `${pct}%`;
+    $('progress-bar').setAttribute('aria-valuenow', String(pct));
+    if (detail) {
+      $('progress-detail').textContent = detail;
+      announce(detail);
     }
-    updateCaptionDisplay(`⚡ Activated "${step.accessibleName || step.type}"`, false);
-  });
-
-  document.getElementById('btn-emulate-rotor')?.addEventListener('click', () => {
-    const filtered = getFilteredSpeechSequence();
-    if (!filtered || filtered.length === 0) return;
-    let nextIdx = -1;
-    for (let i = speechStepIndex + 1; i < filtered.length; i++) {
-      if (filtered[i].type && filtered[i].type.startsWith('Heading')) { nextIdx = i; break; }
-    }
-    if (nextIdx === -1) {
-      for (let i = 0; i <= speechStepIndex; i++) {
-        if (filtered[i].type && filtered[i].type.startsWith('Heading')) { nextIdx = i; break; }
-      }
-    }
-    if (nextIdx !== -1) {
-      speechStepIndex = nextIdx;
-      speakSingleStep(filtered[nextIdx], nextIdx);
-    } else {
-      stepSequentialSpeech(1);
-    }
-  });
-
-  // Compare All 4 Toggle Button
-  const btnToggleCompare = document.getElementById('btn-toggle-compare');
-  btnToggleCompare?.addEventListener('click', () => {
-    showCompareMatrix = !showCompareMatrix;
-    btnToggleCompare.classList.toggle('active', showCompareMatrix);
-    const labelEl = document.getElementById('sr-compare-label');
-    if (labelEl) labelEl.textContent = showCompareMatrix ? 'Hide Matrix' : 'Compare All 4';
-    renderSpeechTimeline(currentAudit?.speechSequence || []);
-  });
-
-  // Rotor Navigation Tabs
-  document.querySelectorAll('.sr-rotor-btn').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      stopSequentialSpeech();
-      document.querySelectorAll('.sr-rotor-btn').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      currentRotor = btn.getAttribute('data-rotor') || 'all';
-      renderSpeechTimeline(currentAudit?.speechSequence || []);
+  }
+  function completeSteps() {
+    document.querySelectorAll('#progress-steps .step').forEach((li) => {
+      if (!li.classList.contains('is-skipped')) li.className = 'step is-done';
+      li.removeAttribute('aria-current');
     });
-  });
+    $('progress-fill').style.width = '100%';
+    $('progress-bar').setAttribute('aria-valuenow', '100');
+  }
 
-  // Speech Audio Playback Buttons
-  document.getElementById('sr-btn-play')?.addEventListener('click', () => {
-    if (isSpeechPlaying && !isSpeechPaused) {
-      pauseSequentialSpeech();
-    } else if (isSpeechPlaying && isSpeechPaused) {
-      resumeSequentialSpeech();
-    } else {
-      const filtered = getFilteredSpeechSequence();
-      const startIdx = (speechStepIndex >= 0 && speechStepIndex < filtered.length) ? speechStepIndex : 0;
-      startSequentialSpeech(startIdx);
+  /* ------------------------------------------------------------------------
+     Audit flow
+     ------------------------------------------------------------------------ */
+  function classifyError(e) {
+    const m = errMsg(e);
+    if (e && e.code) return e.code;
+    if (/cannot access a chrome|chrome:\/\/|edge:\/\/|extensions gallery|cannot be scripted|cannot access contents of the page|about:|webstore/i.test(m)) return 'restricted';
+    if (/file:\/\/|file url|cannot access contents of url "file/i.test(m)) return 'file';
+    if (/timed out|timeout|took longer/i.test(m)) return 'timeout';
+    if (/no tab with id|tab was closed|tab.*closed/i.test(m)) return 'tab-closed';
+    if (/__runWcagAudit|is not a function|could not load file/i.test(m)) return 'engine';
+    if (/frame was removed|navigat/i.test(m)) return 'navigated';
+    return 'generic';
+  }
+
+  function makeError(code, message, extra) {
+    const e = new Error(message);
+    e.code = code;
+    Object.assign(e, extra || {});
+    return e;
+  }
+
+  async function runAudit() {
+    setUrlError('');
+    const url = normalizeUrl($('target-url').value);
+    if (!url) { setUrlError('Enter a valid URL, for example https://example.com.'); return; }
+    state.lastUrl = url;
+
+    const kind = classifyUrl(url);
+    if (kind === 'restricted') return showError('restricted', null, { url });
+    if (kind === 'unsupported') return showError('unsupported', null, { url });
+    if (kind === 'file') {
+      state.fileAccess = await fileSchemeAllowed();
+      if (!state.fileAccess) return showError('file', null, { url });
     }
-  });
 
-  document.getElementById('sr-btn-stop')?.addEventListener('click', () => {
-    stopSequentialSpeech();
-  });
+    const tab = await getActiveTab();
+    if (!tab || tab.id == null) return showError('generic', 'Could not find the active tab. Click into the page you want to audit and try again.');
 
-  document.getElementById('sr-btn-prev')?.addEventListener('click', () => {
-    stepSequentialSpeech(-1);
-  });
+    // Reset per-run state.
+    await resetForNewRun();
+    state.tabId = tab.id;
+    state.tabUrl = tab.url || '';
+    state.windowId = tab.windowId != null ? tab.windowId : null;
 
-  document.getElementById('sr-btn-next')?.addEventListener('click', () => {
-    stepSequentialSpeech(1);
-  });
+    const runId = ++state.runId;
+    const live = () => runId === state.runId;
 
-  // Speech Rate Select
-  document.getElementById('sr-rate-select')?.addEventListener('change', (e) => {
-    // @ts-ignore
-    speechRate = parseFloat(e.target?.value) || 1.25;
-  });
+    $('progress-url').textContent = url;
+    $('progress-detail').textContent = '';
+    document.querySelectorAll('#progress-steps .step').forEach((li) => { li.className = 'step'; });
+    showView('progress');
 
-  // Voice Select
-  document.getElementById('sr-voice-select')?.addEventListener('change', (e) => {
-    // @ts-ignore
-    const voiceName = e.target?.value;
-    selectedVoice = availableVoices.find(v => v.name === voiceName) || null;
-  });
-
-  // Earcons Toggle
-  const earconBtn = document.getElementById('sr-btn-earcons');
-  earconBtn?.addEventListener('click', () => {
-    earconsEnabled = !earconsEnabled;
-    earconBtn.classList.toggle('active', earconsEnabled);
-    const bellSvg = '<svg class="earcon-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>';
-    const bellOffSvg = '<svg class="earcon-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/><path d="M2 2l20 20"/><path d="M8.66 8.66A6 6 0 0 1 18 8c0 7 3 9 3 9H7.34"/><path d="M3 17a2.98 2.98 0 0 0 .5-1.5"/></svg>';
-    earconBtn.innerHTML = `${earconsEnabled ? bellSvg : bellOffSvg} <span class="earcon-label">Audio Cues</span>`;
-  });
-
-  // On-Page Simulator Toggle Button
-  document.getElementById('btn-launch-page-sim')?.addEventListener('click', () => {
-    toggleOnPageSimulator();
-  });
-
-  // Tab Order Drawer Toggle
-  const tabHeader = document.getElementById('tab-order-header-toggle');
-  const tabToggleBtn = document.getElementById('tab-order-toggle-btn');
-  const tabBody = document.getElementById('tab-order-panel-body');
-
-  const toggleTabPanel = () => {
-    if (!tabBody) return;
-    const isHidden = tabBody.classList.toggle('hidden');
-    if (tabToggleBtn) {
-      tabToggleBtn.textContent = isHidden ? '▼ View Sequence' : '▲ Hide Sequence';
-    }
-  };
-
-  tabHeader?.addEventListener('click', () => {
-    toggleTabPanel();
-  });
-  tabToggleBtn?.addEventListener('click', (e) => {
-    e.stopPropagation();
-    toggleTabPanel();
-  });
-
-  // Toggle Tab-Trail Overlay on Web Page
-  document.getElementById('btn-toggle-tab-trail')?.addEventListener('click', async () => {
-    const btn = document.getElementById('btn-toggle-tab-trail');
-    const label = document.getElementById('tab-trail-btn-label');
+    let stage = 0;
     try {
-      const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-      const targetTab = tab || (await chrome.tabs.query({ active: true, currentWindow: true }))[0];
-      if (!targetTab?.id) return;
-
-      const res = await chrome.scripting.executeScript({
-        target: { tabId: targetTab.id },
-        func: () => {
-          // @ts-ignore
-          if (typeof window.__auditforgeToggleTabTrail === 'function') {
-            return window.__auditforgeToggleTabTrail();
-          }
-          return { active: false };
+      // Step 1 — navigation
+      if (!sameUrl(url, tab.url)) {
+        setStep(0, 'active', `Navigating to ${url}…`);
+        const nav = await sendMessage({ type: 'NAVIGATE_AND_WAIT', tabId: tab.id, url });
+        if (!live()) return;
+        if (!nav || !nav.ok) {
+          const msg = (nav && nav.error) || 'Navigation failed.';
+          throw makeError(/longer|timeout/i.test(msg) ? 'timeout' : classifyError(new Error(msg)), msg);
         }
-      });
-
-      const trailResult = res[0]?.result;
-      if (trailResult && trailResult.active) {
-        btn?.classList.add('active');
-        if (label) label.textContent = '✕ Hide Tab-Trail Overlay';
+        state.tabUrl = url;
       } else {
-        btn?.classList.remove('active');
-        if (label) label.textContent = '🗺️ Show Tab-Trail Overlay';
+        setStep(0, 'skipped', 'Already on the target URL.');
       }
-    } catch (err) {
-      console.warn('Could not toggle tab trail on page:', err);
+
+      // Step 2 — injection
+      stage = 1;
+      setStep(1, 'active', 'Injecting WCAG 2.2 ruleset and axe-core…');
+      await withTimeout(injectEngine(tab.id), INJECT_TIMEOUT_MS, 'Script injection');
+      if (!live()) return;
+
+      // Step 3 — audit
+      stage = 2;
+      setStep(2, 'active', 'Auditing DOM, :hover contrast and ARIA labels. This can take a few seconds…');
+      const opts = { deviceId: state.deviceId };
+      const res = await withTimeout(
+        chrome.scripting.executeScript({ target: { tabId: tab.id }, func: (o) => window.__runWcagAudit(o), args: [opts] }),
+        AUDIT_TIMEOUT_MS, 'The audit'
+      );
+      if (!live()) return;
+      const raw = res && res[0] ? res[0].result : null;
+      if (!raw || typeof raw !== 'object') throw makeError('engine', 'The audit engine returned no result. The page may have navigated or blocked script execution.');
+      if (raw.ok === false && !raw.summary) throw makeError('engine', raw.error || 'The audit engine reported an error.', { stageErrors: (raw.meta && raw.meta.stageErrors) || raw.stageErrors });
+      if (!raw.summary && !raw.violations) {
+        throw makeError('engine', 'The audit result was incomplete.', { stageErrors: raw.meta && raw.meta.stageErrors });
+      }
+
+      // Step 4 — compile
+      stage = 3;
+      setStep(3, 'active', 'Compiling compliance scorecard…');
+      const result = normalizeResult(raw);
+      state.result = result;
+      renderResults(result);
+      completeSteps();
+      await sleep(250);
+      if (!live()) return;
+      showView('results');
+      const s = result.summary;
+      announce(`Audit complete. Score ${s.score} out of 100, grade ${s.grade}, ${s.risk} risk, ${plural(s.totalViolations, 'violation')}.`);
+    } catch (e) {
+      if (!live()) return;
+      setStep(stage, 'error');
+      showError(classifyError(e), errMsg(e), { url, stageErrors: e.stageErrors });
     }
-  });
+  }
 
-  // Link Health & Broken Link Checker Drawer Toggle
-  const linkHeader = document.getElementById('link-checker-header-toggle');
-  const linkToggleBtn = document.getElementById('link-checker-toggle-btn');
-  const linkBody = document.getElementById('link-checker-panel-body');
+  async function resetForNewRun() {
+    stopSpeech();
+    state.result = null;
+    state.mobileAnalysisByDevice = {};
+    state.simMeta = {};
+    state.openIssues = new Set();
+    state.openNodes = new Set();
+    state.nodeLimit = {};
+    state.openSections = new Set();
+    state.previews = new Set();
+    state.search = '';
+    state.sevFilter = new Set(IMPACTS);
+    state.linkFilter = 'all';
+    resetOverlayFlags();
+    resetLive();
+    $('wcag-search').value = '';
+  }
 
-  const toggleLinkPanel = () => {
-    if (!linkBody) return;
-    const isHidden = linkBody.classList.toggle('hidden');
-    if (linkToggleBtn) {
-      linkToggleBtn.textContent = isHidden ? '▼ View Links' : '▲ Hide Links';
+  function resetOverlayFlags() {
+    state.mobileSimActive = false;
+    state.hudActive = false;
+    state.tabTrail = false;
+    state.lens = 'none';
+    state.previews = new Set();
+    syncToggleButtons();
+  }
+
+  /* ------------------------------------------------------------------------
+     Result normalisation (defensive: partial engine output must still render)
+     ------------------------------------------------------------------------ */
+  function gradeFor(score) {
+    if (score >= 95) return ['A+', 'Low'];
+    if (score >= 88) return ['A', 'Low'];
+    if (score >= 75) return ['B', 'Moderate'];
+    if (score >= 60) return ['C', 'High'];
+    return ['F', 'Severe'];
+  }
+
+  function normalizeStageErrors(se) {
+    if (!se) return [];
+    if (Array.isArray(se)) {
+      return se.map((x) => (typeof x === 'string' ? { stage: '', message: x }
+        : { stage: String(x.stage || x.name || x.id || ''), message: String(x.message || x.error || JSON.stringify(x)) }));
     }
-  };
+    if (typeof se === 'object') return Object.entries(se).map(([k, v]) => ({ stage: k, message: typeof v === 'string' ? v : (v && (v.message || v.error)) || JSON.stringify(v) }));
+    return [{ stage: '', message: String(se) }];
+  }
 
-  linkHeader?.addEventListener('click', () => {
-    toggleLinkPanel();
-  });
-  linkToggleBtn?.addEventListener('click', (e) => {
-    e.stopPropagation();
-    toggleLinkPanel();
-  });
-
-  // Re-check Links Button
-  document.getElementById('btn-recheck-links')?.addEventListener('click', () => {
-    if (currentAudit?.links) {
-      auditPageLinks(currentAudit.links, true);
+  function normalizeResult(raw) {
+    const r = raw;
+    r.meta = r.meta || {};
+    r.violations = arr(r.violations).map((v) => Object.assign({ impact: 'minor', title: v.id || 'Rule', description: '', wcag: [], tags: [], helpUrl: null }, v, {
+      wcag: arr(v.wcag), tags: arr(v.tags), nodes: arr(v.nodes),
+      impact: IMPACTS.includes(v.impact) ? v.impact : 'minor'
+    }));
+    const counts = { critical: 0, serious: 0, moderate: 0, minor: 0 };
+    r.violations.forEach((v) => { counts[v.impact] += 1; });
+    r.summary = r.summary || {};
+    r.summary.counts = Object.assign({}, counts, r.summary.counts || {});
+    if (typeof r.summary.score !== 'number') {
+      const c = r.summary.counts;
+      const penalty = c.critical * 12 + c.serious * 6 + c.moderate * 3 + c.minor;
+      r.summary.score = Math.max(12, Math.min(100, Math.round(100 - penalty)));
     }
-  });
+    const [g, risk] = gradeFor(r.summary.score);
+    r.summary.grade = r.summary.grade || g;
+    r.summary.risk = r.summary.risk || risk;
+    r.summary.totalViolations = num(r.summary.totalViolations, r.violations.length);
+    r.summary.totalNodes = num(r.summary.totalNodes, r.violations.reduce((a, v) => a + v.nodes.length, 0));
+    r.summary.passes = num(r.summary.passes);
+    r.summary.incomplete = num(r.summary.incomplete);
 
-  // Link Filter Navigation Tabs
-  document.querySelectorAll('.link-filter-btn').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      document.querySelectorAll('.link-filter-btn').forEach((b) => b.classList.remove('active'));
-      btn.classList.add('active');
-      currentLinkFilter = btn.getAttribute('data-link-filter') || 'all';
-      renderLinkCards();
+    const sr = r.screenReader = r.screenReader || {};
+    sr.score = num(sr.score);
+    sr.categories = sr.categories || {};
+    sr.headings = arr(sr.headings);
+    sr.landmarks = sr.landmarks || {};
+    sr.landmarks.list = arr(sr.landmarks.list);
+    sr.silentControls = arr(sr.silentControls);
+    sr.sequence = arr(sr.sequence);
+    sr.barrierCount = num(sr.barrierCount, sr.sequence.filter((s) => s.isBarrier).length);
+
+    const t = r.tabOrder = r.tabOrder || {};
+    t.sequence = arr(t.sequence);
+    t.anomalies = arr(t.anomalies);
+    t.total = num(t.total, t.sequence.length);
+    t.positiveTabindexCount = num(t.positiveTabindexCount);
+    t.skipLink = t.skipLink || { present: false, functional: false, visibleOnFocus: false, selector: null };
+    t.status = t.status || 'Needs Review';
+
+    const l = r.links = r.links || {};
+    l.list = arr(l.list);
+    l.issues = arr(l.issues);
+    l.counts = Object.assign({ ok: 0, warning: 0, error: 0 }, l.counts || {});
+    l.total = num(l.total, l.list.length);
+    l.internal = num(l.internal); l.external = num(l.external); l.anchors = num(l.anchors);
+
+    r.mobile = normalizeMobile(r.mobile || {});
+    r.mobile.devices = arr(r.mobile.devices);
+    r.__stageErrors = normalizeStageErrors(r.meta.stageErrors);
+    return r;
+  }
+
+  function normalizeMobile(m) {
+    m = m || {};
+    m.score = num(m.score);
+    m.viewportMeta = Object.assign({ present: false, content: null, widthDeviceWidth: false, userScalableNo: false, maxScaleRestricted: false, issues: [] }, m.viewportMeta || {});
+    m.viewportMeta.issues = arr(m.viewportMeta.issues);
+    m.overlaps = arr(m.overlaps);
+    m.overflows = arr(m.overflows);
+    m.touchTargets = m.touchTargets || {};
+    m.touchTargets.failures = arr(m.touchTargets.failures);
+    m.touchTargets.crowding = arr(m.touchTargets.crowding);
+    m.stickyOcclusions = arr(m.stickyOcclusions);
+    return m;
+  }
+
+  /* ------------------------------------------------------------------------
+     Error view
+     ------------------------------------------------------------------------ */
+  function showError(code, message, extra = {}) {
+    stopSpeech();
+    const title = $('error-title');
+    const msg = $('error-message');
+    const help = clear($('error-help'));
+    const details = clear($('error-details'));
+    $('error-settings').hidden = true;
+    const url = extra.url || state.lastUrl;
+
+    switch (code) {
+      case 'restricted':
+        title.textContent = 'This page can’t be audited';
+        msg.textContent = 'Chrome does not allow extensions to run scripts on browser-internal pages.';
+        help.append(
+          h('p', null, 'Blocked pages include ', h('code', null, 'chrome://'), ', ', h('code', null, 'edge://'), ', ', h('code', null, 'about:'), ', ', h('code', null, 'view-source:'), ' and the Chrome Web Store.'),
+          h('p', null, 'Open a normal website (http or https) in this tab, then choose Back.')
+        );
+        break;
+      case 'unsupported':
+        title.textContent = 'Unsupported address';
+        msg.textContent = 'Only http, https and file pages can be audited.';
+        break;
+      case 'file':
+        title.textContent = 'File access is needed';
+        msg.textContent = 'To audit local file:// pages, Chrome needs permission for this extension to read file URLs.';
+        help.append(h('ol', null,
+          h('li', null, 'Choose “Open extension settings” below.'),
+          h('li', null, 'Turn on “Allow access to file URLs”.'),
+          h('li', null, 'Reload the page, then run the audit again.')));
+        $('error-settings').hidden = false;
+        break;
+      case 'timeout':
+        title.textContent = 'The page took too long';
+        msg.textContent = message || 'The page did not finish loading or the audit did not finish in time.';
+        help.append(h('p', null, 'Check your connection, wait for the page to finish loading, then try again. Very large pages can take longer to audit.'));
+        break;
+      case 'tab-closed':
+        title.textContent = 'The tab was closed';
+        msg.textContent = 'The tab being audited is no longer available.';
+        break;
+      case 'navigated':
+        title.textContent = 'The page changed during the audit';
+        msg.textContent = message || 'The page navigated away while the audit was running.';
+        help.append(h('p', null, 'Wait for the page to settle, then try again.'));
+        break;
+      case 'engine':
+        title.textContent = 'The audit engine failed';
+        msg.textContent = message || 'The audit engine could not complete.';
+        help.append(h('p', null, 'Reload the page and try again. Some pages block injected scripts with strict security policies.'));
+        break;
+      default:
+        title.textContent = 'Something went wrong';
+        msg.textContent = message || 'The audit could not be completed.';
+        help.append(h('p', null, 'Reload the page and try again.'));
+    }
+    if (message && code !== 'timeout' && code !== 'engine' && code !== 'navigated' && code !== 'generic') {
+      details.append(h('li', null, message));
+    }
+    if (url) details.append(h('li', null, `URL: ${url}`));
+    normalizeStageErrors(extra.stageErrors).forEach((s) => details.append(h('li', null, s.stage ? `${s.stage}: ${s.message}` : s.message)));
+    details.hidden = !details.firstChild;
+    showView('error');
+    announce(`${title.textContent}. ${msg.textContent}`);
+  }
+
+  /* ------------------------------------------------------------------------
+     Results: scorecard
+     ------------------------------------------------------------------------ */
+  function toneForScore(s) {
+    if (s >= 88) return 'green';
+    if (s >= 75) return 'cyan';
+    if (s >= 60) return 'amber';
+    return 'red';
+  }
+  const TONE_HEX = { green: '#00E676', cyan: '#00D1FF', amber: '#FFB800', red: '#FF6B66', orange: '#FF9F43', magenta: '#EC5D87' };
+  const RISK_TONE = { Low: 'green', Moderate: 'cyan', High: 'amber', Severe: 'red' };
+  const SEV_TONE = { critical: 'red', serious: 'orange', moderate: 'amber', minor: 'cyan' };
+
+  /* Score ring. No CSS filters: the soft glow is an inner radial fill drawn
+     inside the ring, so nothing can ever be clipped by the container. */
+  function scoreRing(score, label, size = 120, stroke = 10) {
+    const r = (size - stroke) / 2;
+    const c = 2 * Math.PI * r;
+    const tone = toneForScore(score);
+    const uid = Math.random().toString(36).slice(2, 8);
+    const s = svg('svg', { viewBox: `0 0 ${size} ${size}`, role: 'img', 'aria-label': `${label}: ${score} out of 100` });
+    const defs = svg('defs');
+    const grad = svg('linearGradient', { id: `g${uid}`, x1: '0', y1: '0', x2: '1', y2: '1' });
+    grad.append(svg('stop', { offset: '0%', 'stop-color': TONE_HEX[tone] }), svg('stop', { offset: '100%', 'stop-color': tone === 'red' ? '#EC5D87' : '#00D1FF' }));
+    const glow = svg('radialGradient', { id: `r${uid}`, cx: '50%', cy: '50%', r: '50%' });
+    glow.append(svg('stop', { offset: '60%', 'stop-color': TONE_HEX[tone], 'stop-opacity': '0' }), svg('stop', { offset: '100%', 'stop-color': TONE_HEX[tone], 'stop-opacity': '0.16' }));
+    defs.append(grad, glow);
+    s.append(defs);
+    s.append(svg('circle', { cx: size / 2, cy: size / 2, r: r - stroke / 2, fill: `url(#r${uid})` }));
+    s.append(svg('circle', { class: 'ring-track', cx: size / 2, cy: size / 2, r, fill: 'none', 'stroke-width': stroke }));
+    const val = svg('circle', {
+      class: 'ring-value', cx: size / 2, cy: size / 2, r, fill: 'none', stroke: `url(#g${uid})`, 'stroke-width': stroke,
+      'stroke-linecap': 'round', 'stroke-dasharray': c, 'stroke-dashoffset': c, transform: `rotate(-90 ${size / 2} ${size / 2})`
     });
-  });
-
-  // Color Blindness Lens Buttons
-  document.querySelectorAll('.cvd-pill').forEach((btn) => {
-    btn.addEventListener('click', async () => {
-      document.querySelectorAll('.cvd-pill').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      const cvdType = btn.getAttribute('data-cvd') || 'none';
-
-      // Update CVD Drawer Header Badge
-      const cvdBadge = document.getElementById('cvd-status-badge');
-      if (cvdBadge) {
-        if (cvdType === 'none') {
-          cvdBadge.textContent = 'Normal Spectrum';
-          cvdBadge.style.color = 'var(--color-primary)';
-          cvdBadge.style.borderColor = 'rgba(13, 159, 186, 0.35)';
-        } else {
-          const pillText = btn.textContent?.trim() || cvdType;
-          cvdBadge.textContent = `${pillText} Active`;
-          cvdBadge.style.color = '#fbbf24';
-          cvdBadge.style.borderColor = 'rgba(245, 158, 11, 0.4)';
-        }
-      }
-
-      try {
-        const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-        const targetTab = tab || (await chrome.tabs.query({ active: true, currentWindow: true }))[0];
-        if (!targetTab?.id) return;
-
-        // Ensure audit runner is injected before setting filter
-        await chrome.scripting.executeScript({
-          target: { tabId: targetTab.id },
-          files: ['content/audit-runner.js'],
-        });
-
-        await chrome.scripting.executeScript({
-          target: { tabId: targetTab.id },
-          func: (type) => {
-            // @ts-ignore
-            if (typeof window.__auditforgeSetColorFilter === 'function') {
-              return window.__auditforgeSetColorFilter(type);
-            }
-          },
-          args: [cvdType],
-        });
-      } catch (err) {
-        console.warn('Could not apply color blindness filter:', err);
-      }
-    });
-  });
-}
-
-/**
- * Executes WCAG 2.2 audit against the target URL
- * @param {string} targetUrl
- */
-async function runAudit(targetUrl) {
-  const btnScan = document.getElementById('btn-welcome-scan');
-  const btnGo = document.getElementById('btn-go');
-
-  showProgressView();
-  activePreviewFixes.clear();
-  if (btnScan) {
-    // @ts-ignore
-    btnScan.disabled = true;
-    btnScan.innerHTML = '<span class="btn-icon">⏳</span> <span>Auditing...</span>';
-  }
-  if (btnGo) {
-    // @ts-ignore
-    btnGo.disabled = true;
-    btnGo.innerHTML = '<span class="btn-icon">⏳</span> Auditing...';
-  }
-
-  try {
-    let tab = await getActiveWebTab();
-    if (!tab || !tab.id) {
-      const [curTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-      tab = curTab;
-    }
-    if (!tab || !tab.id) {
-      throw new Error('No active browser tab found.');
-    }
-    currentTabId = tab.id;
-
-    // Cleanly revert any simulated preview fixes before starting fresh audit
-    try {
-      await chrome.scripting.executeScript({
-        target: { tabId: tab.id },
-        func: () => {
-          // @ts-ignore
-          if (typeof window.__auditforgeRevertAllFixes === 'function') {
-            window.__auditforgeRevertAllFixes();
-          }
-        },
-      });
-    } catch (_) {}
-
-    // Normalize URL
-    let validUrl = targetUrl;
-    if (!validUrl.startsWith('http://') && !validUrl.startsWith('https://')) {
-      validUrl = `https://${validUrl}`;
-    }
-
-    // If user specified a different URL, navigate current tab to it
-    if (tab.url !== validUrl && !tab.url.startsWith(validUrl)) {
-      updateProgress('Navigating to Target URL...', 'Loading web page before executing audit...');
-      await new Promise((resolve, reject) => {
-        chrome.runtime.sendMessage({ action: 'NAVIGATE_AND_WAIT', tabId: tab.id, url: validUrl }, (response) => {
-          if (response && response.success) resolve(null);
-          else reject(new Error(response?.error || 'Failed to navigate to target URL.'));
-        });
-      });
-      // Refresh tab reference
-      try {
-        tab = await chrome.tabs.get(tab.id);
-      } catch (_) {
-        tab = await getActiveWebTab();
-      }
-      if (tab?.id) currentTabId = tab.id;
-    }
-
-    // Check if target page is accessible (cannot audit chrome:// or web store pages)
-    if (tab.url.startsWith('chrome://') || tab.url.startsWith('edge://') || tab.url.startsWith('https://chrome.google.com/webstore')) {
-      throw new Error('Browser internal pages and extensions store cannot be scripted due to Chrome security restrictions.');
-    }
-
-    updateProgress('Injecting WCAG 2.2 Ruleset...', 'Loading axe-core and evaluation engine into DOM...');
-
-    // Inject axe-core and audit-runner into page DOM
-    await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      files: ['lib/axe.min.js', 'content/audit-runner.js'],
-    });
-
-    updateProgress('Auditing Page Against WCAG 2.2 AA...', 'Evaluating DOM, :hover contrast, and ARIA semantic accuracy...');
-
-    // Execute audit in the target page
-    const executionResults = await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      func: async () => {
-        // @ts-ignore
-        if (typeof window.__runWcagAudit === 'function') {
-          // @ts-ignore
-          return await window.__runWcagAudit();
-        }
-        throw new Error('Auditor runner was not initialized properly.');
-      },
-    });
-
-    const auditData = executionResults[0]?.result;
-    if (!auditData || !auditData.success) {
-      throw new Error('Audit run did not return results.');
-    }
-
-    currentAudit = auditData;
-
-    // Persist to session storage so popup re-opening retains audit results
-    try {
-      const storageArea = chrome.storage?.session || chrome.storage?.local;
-      if (storageArea) {
-        await storageArea.set({
-          currentAudit,
-          currentFilter,
-          currentTabId,
-          lastUrl: validUrl
-        });
-      }
-    } catch (_) {}
-
-    // Render results
-    renderScorecard(auditData);
-    renderIssuesList();
-
-    showResultsView();
-  } catch (err) {
-    console.error('[Auditor Error]:', err);
-    showErrorView();
-    const msg = document.getElementById('error-message');
-    if (msg) msg.textContent = err.message || 'An unexpected error occurred.';
-  } finally {
-    if (btnScan) {
-      // @ts-ignore
-      btnScan.disabled = false;
-      btnScan.innerHTML = '<span class="btn-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg></span> <span class="btn-text">Run Complete Audit</span>';
-    }
-    if (btnGo) {
-      // @ts-ignore
-      btnGo.disabled = false;
-      btnGo.innerHTML = '<span class="btn-icon"><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg></span> <span>Run Audit</span>';
-    }
-  }
-}
-
-function updateProgress(title, sub) {
-  const pTitle = document.getElementById('progress-title');
-  const pSub = document.getElementById('progress-sub');
-  if (pTitle) pTitle.textContent = title;
-  if (pSub) pSub.textContent = sub;
-}
-
-/**
- * Renders the score card, metrics, and summary
- * @param {Object} audit
- */
-function renderScorecard(audit) {
-  const scoreVal = document.getElementById('score-value');
-  const circle = document.getElementById('score-circle');
-  const grade = document.getElementById('result-grade');
-  const risk = document.getElementById('result-risk');
-  const riskPill = document.getElementById('result-risk-pill');
-  const duration = document.getElementById('result-duration');
-  const title = document.getElementById('result-title');
-  const urlLink = document.getElementById('result-url');
-  const summary = document.getElementById('result-summary');
-
-  if (scoreVal) scoreVal.textContent = String(audit.score);
-  if (grade) grade.textContent = audit.grade;
-  if (risk) risk.textContent = `${audit.riskLevel.toUpperCase()} RISK`;
-  if (duration) duration.textContent = `${audit.scanDurationSeconds}s`;
-  if (title) title.textContent = audit.pageTitle || 'Target Page';
-  if (urlLink) {
-    // @ts-ignore
-    urlLink.href = audit.url;
-    urlLink.textContent = audit.url;
-  }
-  if (summary) summary.textContent = audit.summary;
-
-  // Score circle color (backwards compatible fallback)
-  const riskClass = `risk-${(audit.riskLevel || 'moderate').toLowerCase()}`;
-  if (riskPill) {
-    riskPill.className = `pill risk-pill ${riskClass}`;
-  }
-
-  const borderColors = {
-    Low: '#10b981',
-    Moderate: '#f59e0b',
-    High: '#f97316',
-    Severe: '#ef4444',
-  };
-  if (circle) {
-    circle.style.borderColor = borderColors[audit.riskLevel] || '#3b82f6';
-  }
-
-  // 4 Failure Counters (WCAG Failures, Link Failures, Tab Failures, Screen Reader Barriers)
-  // 1. WCAG Failures
-  const wcagFailures = (audit.violations || []).length;
-  const kpiWcagVal = document.getElementById('kpi-wcag-count');
-  const kpiWcagCard = document.getElementById('kpi-card-wcag');
-  if (kpiWcagVal) {
-    kpiWcagVal.textContent = wcagFailures === 0 ? '✓ 0' : String(wcagFailures);
-    if (kpiWcagCard) {
-      if (wcagFailures > 0) {
-        kpiWcagCard.classList.remove('kpi-zero-failures');
-        kpiWcagCard.classList.add('kpi-has-failures');
-      } else {
-        kpiWcagCard.classList.remove('kpi-has-failures');
-        kpiWcagCard.classList.add('kpi-zero-failures');
-      }
-    }
-  }
-
-  // 2. Link Failures
-  const linkAudit = audit.linkAudit;
-  const linkFailures = linkAudit ? (linkAudit.broken || 0) : 0;
-  const kpiLinkVal = document.getElementById('kpi-links-count');
-  const kpiLinkCard = document.getElementById('kpi-card-links');
-  if (kpiLinkVal) {
-    if (!linkAudit && audit.links && audit.links.length > 0) {
-      kpiLinkVal.textContent = '...';
-      kpiLinkCard?.classList.remove('kpi-has-failures', 'kpi-zero-failures');
-    } else {
-      kpiLinkVal.textContent = linkFailures === 0 ? '✓ 0' : String(linkFailures);
-      if (kpiLinkCard) {
-        if (linkFailures > 0) {
-          kpiLinkCard.classList.remove('kpi-zero-failures');
-          kpiLinkCard.classList.add('kpi-has-failures');
-        } else {
-          kpiLinkCard.classList.remove('kpi-has-failures');
-          kpiLinkCard.classList.add('kpi-zero-failures');
-        }
-      }
-    }
-  }
-
-  // 3. Tab Failures
-  const tabFailures = audit.tabOrder ? (audit.tabOrder.positiveTabIndexCount || 0) : 0;
-  const kpiTabVal = document.getElementById('kpi-tab-count');
-  const kpiTabCard = document.getElementById('kpi-card-tab');
-  if (kpiTabVal) {
-    kpiTabVal.textContent = tabFailures === 0 ? '✓ 0' : String(tabFailures);
-    if (kpiTabCard) {
-      if (tabFailures > 0) {
-        kpiTabCard.classList.remove('kpi-zero-failures');
-        kpiTabCard.classList.add('kpi-has-failures');
-      } else {
-        kpiTabCard.classList.remove('kpi-has-failures');
-        kpiTabCard.classList.add('kpi-zero-failures');
-      }
-    }
-  }
-
-  // 4. Screen Reader Barriers
-  const srFailures = (audit.speechSequence || []).filter(s => s.isBarrier).length;
-  const kpiSrVal = document.getElementById('kpi-sr-count');
-  const kpiSrCard = document.getElementById('kpi-card-sr');
-  if (kpiSrVal) {
-    kpiSrVal.textContent = srFailures === 0 ? '✓ 0' : String(srFailures);
-    if (kpiSrCard) {
-      if (srFailures > 0) {
-        kpiSrCard.classList.remove('kpi-zero-failures');
-        kpiSrCard.classList.add('kpi-has-failures');
-      } else {
-        kpiSrCard.classList.remove('kpi-has-failures');
-        kpiSrCard.classList.add('kpi-zero-failures');
-      }
-    }
-  }
-
-  // Screen Reader Compatibility Metrics
-  const srScore = audit.screenReaderScore !== undefined ? audit.screenReaderScore : 100;
-  const srScoreEl = document.getElementById('result-sr-score');
-  const srBadgeEl = document.getElementById('sr-score-badge');
-  const srBarriersEl = document.getElementById('sr-barrier-count');
-  const srLandmarkEl = document.getElementById('sr-landmark-status');
-  const srHeadingEl = document.getElementById('sr-heading-status');
-
-  if (srScoreEl) srScoreEl.textContent = `${srScore}/100`;
-  if (srBadgeEl) {
-    srBadgeEl.textContent = `${srScore}/100 VoiceOver`;
-    if (srScore >= 85) {
-      srBadgeEl.style.color = '#34d399';
-      srBadgeEl.style.borderColor = 'rgba(16, 185, 129, 0.4)';
-      srBadgeEl.style.background = 'rgba(16, 185, 129, 0.15)';
-    } else if (srScore >= 70) {
-      srBadgeEl.style.color = '#fbbf24';
-      srBadgeEl.style.borderColor = 'rgba(245, 158, 11, 0.4)';
-      srBadgeEl.style.background = 'rgba(245, 158, 11, 0.15)';
-    } else {
-      srBadgeEl.style.color = '#f87171';
-      srBadgeEl.style.borderColor = 'rgba(239, 68, 68, 0.4)';
-      srBadgeEl.style.background = 'rgba(239, 68, 68, 0.15)';
-    }
-  }
-
-  const barrierCount = (audit.speechSequence || []).filter(s => s.isBarrier).length;
-  if (srBarriersEl) {
-    srBarriersEl.textContent = `${barrierCount} detected`;
-    srBarriersEl.style.color = barrierCount === 0 ? '#34d399' : '#f87171';
-  }
-
-  const hasLandmarkIssue = (audit.violations || []).some(v => v.id === 'screen-reader-landmarks' || v.id === 'landmark-one-main');
-  if (srLandmarkEl) {
-    srLandmarkEl.textContent = hasLandmarkIssue ? 'Deficient / Missing' : 'Verified';
-    srLandmarkEl.style.color = hasLandmarkIssue ? '#f87171' : '#34d399';
-  }
-
-  const hasHeadingIssue = (audit.violations || []).some(v => v.id === 'screen-reader-heading-order' || v.id === 'heading-order');
-  if (srHeadingEl) {
-    srHeadingEl.textContent = hasHeadingIssue ? 'Broken / Skipped' : 'Sequential';
-    srHeadingEl.style.color = hasHeadingIssue ? '#f87171' : '#34d399';
-  }
-
-  // Update Rotor Filter Counts
-  const seq = audit.speechSequence || [];
-  const rAll = document.getElementById('rotor-count-all');
-  const rHead = document.getElementById('rotor-count-heading');
-  const rLand = document.getElementById('rotor-count-landmark');
-  const rLink = document.getElementById('rotor-count-link');
-  const rCtrl = document.getElementById('rotor-count-control');
-  const rText = document.getElementById('rotor-count-text');
-
-  if (rAll) rAll.textContent = String(seq.length);
-  if (rHead) rHead.textContent = String(seq.filter(s => s.rotorCategory === 'heading').length);
-  if (rLand) rLand.textContent = String(seq.filter(s => s.rotorCategory === 'landmark').length);
-  if (rLink) rLink.textContent = String(seq.filter(s => s.rotorCategory === 'link').length);
-  if (rCtrl) rCtrl.textContent = String(seq.filter(s => s.rotorCategory === 'control').length);
-  if (rText) rText.textContent = String(seq.filter(s => s.rotorCategory === 'text').length);
-
-  renderSpeechTimeline(audit.speechSequence || []);
-  renderTabOrderSequence(audit.tabOrder);
-
-  // Link Health & Broken Link Auditor
-  initOrRenderLinkAudit(audit.links, audit.linkAudit);
-  if (audit.links && audit.links.length > 0 && (!audit.linkAudit || !audit.linkAudit.isComplete)) {
-    auditPageLinks(audit.links, false);
-  }
-
-  // Key Metrics
-  const mCrit = document.getElementById('metric-critical');
-  const mSer = document.getElementById('metric-serious');
-  const mMod = document.getElementById('metric-moderate');
-  const mPass = document.getElementById('metric-passed');
-
-  if (mCrit) mCrit.textContent = String(audit.stats.criticalCount);
-  if (mSer) mSer.textContent = String(audit.stats.seriousCount);
-  if (mMod) mMod.textContent = String(audit.stats.moderateCount);
-  if (mPass) mPass.textContent = String(audit.stats.rulesPassedCount);
-
-  // Tab counts
-  const tabAll = document.getElementById('tab-count-all');
-  const tabCrit = document.getElementById('tab-count-crit');
-  const tabSer = document.getElementById('tab-count-ser');
-  const tabMod = document.getElementById('tab-count-mod');
-
-  if (tabAll) tabAll.textContent = String(audit.violations.length);
-  if (tabCrit) tabCrit.textContent = String(audit.violations.filter(v => v.impact === 'critical').length);
-  if (tabSer) tabSer.textContent = String(audit.violations.filter(v => v.impact === 'serious').length);
-  if (tabMod) tabMod.textContent = String(audit.violations.filter(v => v.impact === 'moderate').length);
-
-  // Update Issues Collapsible Drawer Status Badge
-  const issuesBadge = document.getElementById('issues-status-badge');
-  const violationCount = (audit.violations || []).length;
-  if (issuesBadge) {
-    if (violationCount === 0) {
-      issuesBadge.textContent = '✓ 0 Issues Passed';
-      issuesBadge.style.color = '#34d399';
-      issuesBadge.style.borderColor = 'rgba(16, 185, 129, 0.4)';
-      issuesBadge.style.background = 'rgba(16, 185, 129, 0.15)';
-    } else {
-      issuesBadge.textContent = `${violationCount} Issue${violationCount === 1 ? '' : 's'}`;
-      issuesBadge.style.color = '#f87171';
-      issuesBadge.style.borderColor = 'rgba(239, 68, 68, 0.4)';
-      issuesBadge.style.background = 'rgba(244, 63, 94, 0.18)';
-    }
-  }
-}
-
-/**
- * Updates the screen reader formula, badges, and controls in the popup
- */
-function updatePersonaUI() {
-  const cfg = PERSONA_CONFIG[currentPersona] || PERSONA_CONFIG['ios-voiceover'];
-  const formulaEl = document.getElementById('sr-formula-text');
-  const badgeEl = document.getElementById('sr-caption-badge');
-  const prevEl = document.getElementById('sr-label-prev');
-  const nextEl = document.getElementById('sr-label-next');
-  const actEl = document.getElementById('sr-label-activate');
-  const rotorIconEl = document.getElementById('sr-icon-rotor');
-  const rotorLabelEl = document.getElementById('sr-label-rotor');
-
-  if (formulaEl) formulaEl.textContent = cfg.formula;
-  if (badgeEl) badgeEl.textContent = cfg.badgeText;
-  if (prevEl) prevEl.textContent = cfg.prevLabel;
-  if (nextEl) nextEl.textContent = cfg.nextLabel;
-  if (actEl) actEl.textContent = cfg.activateLabel;
-  if (rotorIconEl) rotorIconEl.textContent = cfg.rotorIcon;
-  if (rotorLabelEl) rotorLabelEl.textContent = cfg.rotorLabel;
-
-  // Auto-select best platform voice if available
-  if (availableVoices && availableVoices.length > 0) {
-    const matchedVoice = availableVoices.find(v => cfg.voicePattern.test(v.name));
-    if (matchedVoice) {
-      selectedVoice = matchedVoice;
-      const select = document.getElementById('sr-voice-select');
-      // @ts-ignore
-      if (select) select.value = matchedVoice.name;
-    }
-  }
-}
-
-/**
- * Retrieves the announcement string corresponding to the specified screen reader persona
- * 1. iOS VoiceOver: [Name], [State], [Role], [Hint]
- * 2. Android TalkBack: [Name], [Role], [State], [Hint]
- * 3. NVDA: [Role], [Name], [State]
- * 4. Windows Narrator: [Name], [Role], [State], [Scan Position]
- * @param {Object} step
- * @param {string} [persona]
- * @returns {string}
- */
-function getStepAnnouncement(step, persona = currentPersona) {
-  if (!step) return '';
-  const p = (persona || '').toLowerCase();
-  if (p === 'android-talkback' || p === 'talkback') {
-    return step.talkBackText || step.spokenText || '';
-  }
-  if (p === 'nvda') {
-    return step.nvdaText || step.spokenText || '';
-  }
-  if (p === 'narrator' || p === 'windows-narrator') {
-    return step.narratorText || step.spokenText || '';
-  }
-  return step.voiceOverText || step.spokenText || '';
-}
-
-/**
- * Filters the active audit's speech sequence by the selected rotor category
- * @returns {Array<Object>}
- */
-function getFilteredSpeechSequence() {
-  const seq = (currentAudit && currentAudit.speechSequence) ? currentAudit.speechSequence : [];
-  if (currentRotor === 'all') return seq;
-  return seq.filter(s => s.rotorCategory === currentRotor);
-}
-
-/**
- * Populates system voices into the voice selector dropdown
- */
-function populateVoiceSelect() {
-  const select = document.getElementById('sr-voice-select');
-  if (!select || !('speechSynthesis' in window)) return;
-
-  const loadVoices = () => {
-    availableVoices = window.speechSynthesis.getVoices() || [];
-    if (availableVoices.length === 0) return;
-
-    select.innerHTML = '<option value="">Default System Voice</option>';
-    const englishVoices = availableVoices.filter(v => v.lang && v.lang.startsWith('en'));
-    const voicesToRender = englishVoices.length > 0 ? englishVoices : availableVoices;
-
-    voicesToRender.forEach((v) => {
-      const opt = document.createElement('option');
-      opt.value = v.name;
-      opt.textContent = `${v.name} (${v.lang})`;
-      select.appendChild(opt);
-    });
-
-    // Run persona voice match
-    updatePersonaUI();
-  };
-
-  loadVoices();
-  if ('onvoiceschanged' in window.speechSynthesis) {
-    window.speechSynthesis.onvoiceschanged = loadVoices;
-  }
-}
-
-/**
- * Generates synthesized earcons (auditory sound cues) tailored to each screen reader
- * @param {'barrier'|'link'|'landmark'|'control'} type
- * @param {string} [persona]
- */
-function playEarcon(type, persona = currentPersona) {
-  if (!earconsEnabled) return;
-  try {
-    if (!audioCtx) {
-      // @ts-ignore
-      const AudioCtxClass = window.AudioContext || window.webkitAudioContext;
-      if (AudioCtxClass) audioCtx = new AudioCtxClass();
-    }
-    if (!audioCtx) return;
-    if (audioCtx.state === 'suspended') audioCtx.resume();
-
-    const now = audioCtx.currentTime;
-    const norm = (persona || '').toLowerCase();
-    const isTB = norm === 'android-talkback' || norm === 'talkback';
-    const isNV = norm === 'nvda';
-    const isNarr = norm === 'narrator' || norm === 'windows-narrator';
-
-    if (isTB) {
-      // Android TalkBack: Resonant bubble bloop (frequency drop)
-      const osc = audioCtx.createOscillator();
-      const gain = audioCtx.createGain();
-      osc.type = 'sine';
-      osc.connect(gain);
-      gain.connect(audioCtx.destination);
-      if (type === 'barrier') {
-        osc.frequency.setValueAtTime(220, now);
-        osc.frequency.exponentialRampToValueAtTime(110, now + 0.14);
-        gain.gain.setValueAtTime(0.08, now);
-        gain.gain.linearRampToValueAtTime(0.001, now + 0.14);
-        osc.start(now);
-        osc.stop(now + 0.14);
-      } else {
-        osc.frequency.setValueAtTime(460, now);
-        osc.frequency.exponentialRampToValueAtTime(280, now + 0.09);
-        gain.gain.setValueAtTime(0.06, now);
-        gain.gain.linearRampToValueAtTime(0.001, now + 0.09);
-        osc.start(now);
-        osc.stop(now + 0.09);
-      }
-    } else if (isNV) {
-      // NVDA: Synthesized crisp dual-tone chirp
-      const osc = audioCtx.createOscillator();
-      const gain = audioCtx.createGain();
-      osc.type = 'square';
-      osc.connect(gain);
-      gain.connect(audioCtx.destination);
-      if (type === 'barrier') {
-        osc.frequency.setValueAtTime(140, now);
-        gain.gain.setValueAtTime(0.07, now);
-        gain.gain.linearRampToValueAtTime(0.001, now + 0.12);
-        osc.start(now);
-        osc.stop(now + 0.12);
-      } else {
-        osc.frequency.setValueAtTime(440, now);
-        osc.frequency.setValueAtTime(660, now + 0.04);
-        gain.gain.setValueAtTime(0.035, now);
-        gain.gain.linearRampToValueAtTime(0.001, now + 0.08);
-        osc.start(now);
-        osc.stop(now + 0.08);
-      }
-    } else if (isNarr) {
-      // Windows Narrator: Fluent two-tone melodic chime (D5 & A5 soft sine)
-      const osc1 = audioCtx.createOscillator();
-      const osc2 = audioCtx.createOscillator();
-      const gain = audioCtx.createGain();
-      osc1.type = 'sine';
-      osc2.type = 'sine';
-      osc1.connect(gain);
-      osc2.connect(gain);
-      gain.connect(audioCtx.destination);
-      if (type === 'barrier') {
-        osc1.frequency.setValueAtTime(180, now);
-        osc2.frequency.setValueAtTime(135, now);
-      } else {
-        osc1.frequency.setValueAtTime(587.33, now);
-        osc2.frequency.setValueAtTime(880, now);
-      }
-      gain.gain.setValueAtTime(0.04, now);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
-      osc1.start(now);
-      osc2.start(now);
-      osc1.stop(now + 0.12);
-      osc2.stop(now + 0.12);
-    } else {
-      // iOS VoiceOver: Harmonic crystalline bell chime (E5 & C6 harmonic)
-      const osc = audioCtx.createOscillator();
-      const gain = audioCtx.createGain();
-      osc.type = 'sine';
-      osc.connect(gain);
-      gain.connect(audioCtx.destination);
-      if (type === 'barrier') {
-        osc.frequency.setValueAtTime(196, now);
-        osc.frequency.exponentialRampToValueAtTime(110, now + 0.15);
-        gain.gain.setValueAtTime(0.07, now);
-        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.15);
-        osc.start(now);
-        osc.stop(now + 0.15);
-      } else if (type === 'link') {
-        osc.frequency.setValueAtTime(659.25, now);
-        osc.frequency.exponentialRampToValueAtTime(987.77, now + 0.08);
-        gain.gain.setValueAtTime(0.05, now);
-        gain.gain.linearRampToValueAtTime(0.001, now + 0.08);
-        osc.start(now);
-        osc.stop(now + 0.08);
-      } else if (type === 'landmark') {
-        osc.frequency.setValueAtTime(523.25, now);
-        gain.gain.setValueAtTime(0.045, now);
-        gain.gain.linearRampToValueAtTime(0.001, now + 0.1);
-        osc.start(now);
-        osc.stop(now + 0.1);
-      } else {
-        osc.frequency.setValueAtTime(523.25, now);
-        osc.frequency.exponentialRampToValueAtTime(783.99, now + 0.07);
-        gain.gain.setValueAtTime(0.045, now);
-        gain.gain.linearRampToValueAtTime(0.001, now + 0.07);
-        osc.start(now);
-        osc.stop(now + 0.07);
-      }
-    }
-  } catch (_) {}
-}
-
-/**
- * Updates the live VoiceOver caption banner in the drawer
- * @param {string} text
- * @param {boolean} isSpeaking
- */
-function updateCaptionDisplay(text, isSpeaking = false) {
-  const captionTextEl = document.getElementById('sr-caption-text');
-  const indicatorEl = document.getElementById('sr-caption-indicator');
-  if (captionTextEl) {
-    captionTextEl.textContent = text ? `🗣️ "${text}"` : 'Ready to speak.';
-  }
-  if (indicatorEl) {
-    if (isSpeaking) indicatorEl.classList.remove('hidden');
-    else indicatorEl.classList.add('hidden');
-  }
-}
-
-/**
- * Updates Play/Pause button UI during sequential speech playback
- * @param {boolean} isPlaying
- * @param {boolean} [isPaused]
- */
-function updatePlayButtonUI(isPlaying, isPaused = false) {
-  const btnPlay = document.getElementById('sr-btn-play');
-  const icon = document.getElementById('sr-play-icon');
-  const label = document.getElementById('sr-play-label');
-  const btnStop = document.getElementById('sr-btn-stop');
-
-  if (btnStop) {
-    // @ts-ignore
-    btnStop.disabled = !isPlaying && !isPaused;
-  }
-
-  if (btnPlay && icon && label) {
-    if (isPlaying && !isPaused) {
-      btnPlay.classList.add('is-playing');
-      icon.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>';
-      label.textContent = 'Pause';
-    } else if (isPaused) {
-      btnPlay.classList.remove('is-playing');
-      icon.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>';
-      label.textContent = 'Resume';
-    } else {
-      btnPlay.classList.remove('is-playing');
-      icon.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>';
-      label.textContent = 'Read All';
-    }
-  }
-}
-
-/**
- * Highlights the active step card in the popup timeline and scrolls it into view
- * @param {number} idx
- */
-function highlightTimelineCard(idx) {
-  const container = document.getElementById('speech-timeline');
-  if (!container) return;
-
-  container.querySelectorAll('.speech-step-card').forEach((c, i) => {
-    if (i === idx) {
-      c.classList.add('is-active-speaking');
-      if (!c.querySelector('.sr-equalizer')) {
-        const topEl = c.querySelector('.speech-step-top');
-        if (topEl) {
-          const eq = document.createElement('div');
-          eq.className = 'sr-equalizer';
-          eq.innerHTML = '<span class="sr-eq-bar"></span><span class="sr-eq-bar"></span><span class="sr-eq-bar"></span>';
-          topEl.prepend(eq);
-        }
-      }
-      c.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-    } else {
-      c.classList.remove('is-active-speaking');
-      c.querySelector('.sr-equalizer')?.remove();
-    }
-  });
-}
-
-/**
- * Clears active speaking styling from all timeline cards
- */
-function clearTimelineActiveCard() {
-  const container = document.getElementById('speech-timeline');
-  if (!container) return;
-  container.querySelectorAll('.speech-step-card').forEach((c) => {
-    c.classList.remove('is-active-speaking');
-    c.querySelector('.sr-equalizer')?.remove();
-  });
-}
-
-/**
- * Audibly speaks a single step using SpeechSynthesis and synchronizes webpage highlighting
- * @param {Object} step
- * @param {number} filteredIdx
- * @param {Function} [onComplete] - Callback receiving (isSuccess: boolean)
- */
-function speakSingleStep(step, filteredIdx, onComplete = null) {
-  if (!('speechSynthesis' in window)) {
-    alert('Web Speech API is not supported in this browser.');
-    if (typeof onComplete === 'function') onComplete(false);
-    return;
-  }
-
-  // Clear any scheduled auto-play timer
-  if (speechPlaybackTimer) {
-    clearTimeout(speechPlaybackTimer);
-    speechPlaybackTimer = null;
-  }
-
-  // Increment utterance generation ID to invalidate any callbacks from prior cancelled steps
-  const utteranceId = ++currentUtteranceId;
-
-  // Cancel any active speech. In Chromium, cancel() triggers onerror ('canceled') on the previous utterance.
-  // Because utteranceId has changed, that aborted utterance's callbacks will be safely ignored.
-  window.speechSynthesis.cancel();
-
-  const textToSpeak = getStepAnnouncement(step);
-  updateCaptionDisplay(textToSpeak, true);
-
-  if (step.isBarrier) {
-    playEarcon('barrier', currentPersona);
-  } else if (step.type === 'Link') {
-    playEarcon('link', currentPersona);
-  } else if (step.type === 'Landmark') {
-    playEarcon('landmark', currentPersona);
-  } else {
-    playEarcon('control', currentPersona);
-  }
-
-  highlightTimelineCard(filteredIdx);
-
-  if (step.selector) {
-    highlightElementOnPage(step.selector, {
-      impact: step.isBarrier ? 'serious' : 'minor',
-      help: step.isBarrier ? `Auditory Barrier (${step.type})` : `Screen Reader: ${step.type}`,
-      wcagRule: step.spokenText,
-      target: step.selector,
-    });
-  }
-
-  const utterance = new SpeechSynthesisUtterance(textToSpeak);
-  utterance.rate = speechRate;
-  if (selectedVoice) {
-    utterance.voice = selectedVoice;
-  }
-
-  let completed = false;
-  const finish = (isSuccess) => {
-    // If a newer utterance started or playback was stopped, silently ignore this completion
-    if (utteranceId !== currentUtteranceId) return;
-    if (completed) return;
-    completed = true;
-
-    updateCaptionDisplay(textToSpeak, false);
-    clearTimelineActiveCard();
-
-    if (typeof onComplete === 'function') {
-      onComplete(isSuccess);
-    }
-  };
-
-  utterance.onend = () => {
-    finish(true);
-  };
-
-  utterance.onerror = (e) => {
-    // Aborted or cancelled utterances must NOT trigger sequential step advancement
-    finish(false);
-  };
-
-  window.speechSynthesis.speak(utterance);
-}
-
-/**
- * Advances to the next item during sequential auto-play
- */
-function advanceAndPlayNext() {
-  if (!isSpeechPlaying || isSpeechPaused) return;
-
-  const filtered = getFilteredSpeechSequence();
-  if (!filtered || filtered.length === 0) {
-    stopSequentialSpeech();
-    return;
-  }
-
-  speechStepIndex++;
-
-  if (speechStepIndex >= filtered.length) {
-    stopSequentialSpeech();
-    return;
-  }
-
-  const currentStep = filtered[speechStepIndex];
-  speakSingleStep(currentStep, speechStepIndex, (isSuccess) => {
-    // Only continue if the step finished speaking naturally and auto-play is still active
-    if (isSuccess && isSpeechPlaying && !isSpeechPaused) {
-      if (speechStepIndex + 1 < filtered.length) {
-        speechPlaybackTimer = setTimeout(advanceAndPlayNext, 450);
-      } else {
-        stopSequentialSpeech();
-      }
-    }
-  });
-}
-
-/**
- * Starts sequential automated playback through the filtered speech timeline
- * @param {number} [startIndex]
- */
-function startSequentialSpeech(startIndex = 0) {
-  const filtered = getFilteredSpeechSequence();
-  if (!filtered || filtered.length === 0) return;
-
-  if (speechPlaybackTimer) {
-    clearTimeout(speechPlaybackTimer);
-    speechPlaybackTimer = null;
-  }
-
-  isSpeechPlaying = true;
-  isSpeechPaused = false;
-  speechStepIndex = Math.max(0, Math.min(startIndex, filtered.length - 1));
-
-  updatePlayButtonUI(true);
-
-  const currentStep = filtered[speechStepIndex];
-  speakSingleStep(currentStep, speechStepIndex, (isSuccess) => {
-    if (isSuccess && isSpeechPlaying && !isSpeechPaused) {
-      if (speechStepIndex + 1 < filtered.length) {
-        speechPlaybackTimer = setTimeout(advanceAndPlayNext, 450);
-      } else {
-        stopSequentialSpeech();
-      }
-    }
-  });
-}
-
-/**
- * Pauses automated speech playback
- */
-function pauseSequentialSpeech() {
-  if (speechPlaybackTimer) {
-    clearTimeout(speechPlaybackTimer);
-    speechPlaybackTimer = null;
-  }
-  if (isSpeechPlaying && !isSpeechPaused) {
-    isSpeechPaused = true;
-    if ('speechSynthesis' in window) {
-      window.speechSynthesis.pause();
-    }
-    updatePlayButtonUI(false, true);
-  }
-}
-
-/**
- * Resumes paused speech playback
- */
-function resumeSequentialSpeech() {
-  if (isSpeechPlaying && isSpeechPaused) {
-    isSpeechPaused = false;
-    if ('speechSynthesis' in window) {
-      window.speechSynthesis.resume();
-    }
-    updatePlayButtonUI(true);
-  }
-}
-
-/**
- * Completely stops automated speech playback
- */
-function stopSequentialSpeech() {
-  if (speechPlaybackTimer) {
-    clearTimeout(speechPlaybackTimer);
-    speechPlaybackTimer = null;
-  }
-  currentUtteranceId++;
-
-  isSpeechPlaying = false;
-  isSpeechPaused = false;
-  speechStepIndex = -1;
-
-  if ('speechSynthesis' in window) {
-    window.speechSynthesis.cancel();
-  }
-  updatePlayButtonUI(false);
-  clearTimelineActiveCard();
-  updateCaptionDisplay('Speech playback stopped.', false);
-}
-
-/**
- * Jumps to the previous or next step in the speech sequence
- * @param {number} direction - (+1 for Next / Fast-Forward, -1 for Previous / Rewind)
- */
-function stepSequentialSpeech(direction) {
-  const filtered = getFilteredSpeechSequence();
-  if (!filtered || filtered.length === 0) return;
-
-  // Clear any existing timer immediately
-  if (speechPlaybackTimer) {
-    clearTimeout(speechPlaybackTimer);
-    speechPlaybackTimer = null;
-  }
-
-  // Calculate destination index
-  let targetIndex = speechStepIndex + direction;
-  if (speechStepIndex === -1 && direction > 0) {
-    targetIndex = 0;
-  } else if (targetIndex < 0) {
-    targetIndex = 0;
-  } else if (targetIndex >= filtered.length) {
-    targetIndex = filtered.length - 1;
-  }
-
-  speechStepIndex = targetIndex;
-
-  // Speak the selected step
-  speakSingleStep(filtered[speechStepIndex], speechStepIndex, (isSuccess) => {
-    if (isSuccess && isSpeechPlaying && !isSpeechPaused) {
-      if (speechStepIndex + 1 < filtered.length) {
-        speechPlaybackTimer = setTimeout(advanceAndPlayNext, 450);
-      } else {
-        stopSequentialSpeech();
-      }
-    }
-  });
-}
-
-/**
- * Toggles the In-Page Interactive Screen Reader Simulator on the audited webpage
- */
-async function toggleOnPageSimulator() {
-  const btn = document.getElementById('btn-launch-page-sim');
-  let [targetTab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-  if (!targetTab || !targetTab.id) {
-    [targetTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  }
-  if (!targetTab || !targetTab.id) return;
-
-  isPageSimActive = !isPageSimActive;
-
-  if (isPageSimActive) {
-    if (btn) {
-      btn.classList.add('active');
-      btn.innerHTML = '<span>⏹</span> Exit On-Page Sim';
-    }
-    const cfg = PERSONA_CONFIG[currentPersona] || PERSONA_CONFIG['ios-voiceover'];
-    updateCaptionDisplay(`On-Page ${cfg.name} active. Use Arrow keys / Swipes or HUD on the page.`, true);
-    await chrome.scripting.executeScript({
-      target: { tabId: targetTab.id },
-      files: ['content/audit-runner.js'],
-    });
-    await chrome.scripting.executeScript({
-      target: { tabId: targetTab.id },
-      func: (persona) => {
-        // @ts-ignore
-        if (typeof window.__auditforgeStartVoiceOverSimulator === 'function') {
-          // @ts-ignore
-          window.__auditforgeStartVoiceOverSimulator(persona);
-        }
-      },
-      args: [currentPersona],
-    });
-  } else {
-    if (btn) {
-      btn.classList.remove('active');
-      btn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg> <span>Launch On-Page Sim</span>';
-    }
-    updateCaptionDisplay('On-Page Simulator exited.', false);
-    await chrome.scripting.executeScript({
-      target: { tabId: targetTab.id },
-      func: () => {
-        // @ts-ignore
-        if (typeof window.__auditforgeStopVoiceOverSimulator === 'function') {
-          // @ts-ignore
-          window.__auditforgeStopVoiceOverSimulator();
-        }
-      },
-    });
-  }
-}
-
-/**
- * Renders the simulated speech sequence readout into the timeline with rotor filtering
- * @param {Array<Object>} [speechSequence]
- */
-function renderSpeechTimeline(speechSequence) {
-  const container = document.getElementById('speech-timeline');
-  if (!container) return;
-
-  const sequence = speechSequence || (currentAudit ? currentAudit.speechSequence : []) || [];
-  const filtered = currentRotor === 'all'
-    ? sequence
-    : sequence.filter(s => s.rotorCategory === currentRotor);
-
-  if (!filtered || filtered.length === 0) {
-    container.innerHTML = `
-      <div style="padding: 16px; text-align: center; color: var(--text-dim); font-size: 11px;">
-        No sequential elements found matching the "${escapeHtml(currentRotor)}" rotor filter on this page.
-      </div>
-    `;
-    return;
-  }
-
-  container.innerHTML = filtered.map((step, idx) => {
-    const barrierClass = step.isBarrier ? 'is-barrier' : '';
-    const barrierBadge = step.isBarrier
-      ? `<span class="speech-barrier-badge"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg> Barrier</span>`
-      : '';
-    const stateBadge = step.state
-      ? `<span class="speech-state-badge">${escapeHtml(step.state)}</span>`
-      : '';
-    const announcementText = getStepAnnouncement(step);
-
-    let matrixHtml = '';
-    if (showCompareMatrix) {
-      matrixHtml = `
-        <div class="sr-compare-matrix">
-          <div class="sr-matrix-row ${currentPersona === 'ios-voiceover' ? 'is-active-row' : ''}">
-            <span class="sr-matrix-badge sr-badge-vo">🍏 iOS VoiceOver</span>
-            <span class="sr-matrix-text">${escapeHtml(step.voiceOverText || step.spokenText)}</span>
-            <button type="button" class="sr-matrix-speak-btn" data-persona="ios-voiceover" title="Speak VoiceOver version">▶ Listen</button>
-          </div>
-          <div class="sr-matrix-row ${currentPersona === 'android-talkback' ? 'is-active-row' : ''}">
-            <span class="sr-matrix-badge sr-badge-tb">🤖 TalkBack</span>
-            <span class="sr-matrix-text">${escapeHtml(step.talkBackText || step.spokenText)}</span>
-            <button type="button" class="sr-matrix-speak-btn" data-persona="android-talkback" title="Speak TalkBack version">▶ Listen</button>
-          </div>
-          <div class="sr-matrix-row ${currentPersona === 'nvda' ? 'is-active-row' : ''}">
-            <span class="sr-matrix-badge sr-badge-nvda">🖥️ NVDA</span>
-            <span class="sr-matrix-text">${escapeHtml(step.nvdaText || step.spokenText)}</span>
-            <button type="button" class="sr-matrix-speak-btn" data-persona="nvda" title="Speak NVDA version">▶ Listen</button>
-          </div>
-          <div class="sr-matrix-row ${currentPersona === 'narrator' ? 'is-active-row' : ''}">
-            <span class="sr-matrix-badge sr-badge-narrator">🪟 Narrator</span>
-            <span class="sr-matrix-text">${escapeHtml(step.narratorText || step.spokenText)}</span>
-            <button type="button" class="sr-matrix-speak-btn" data-persona="narrator" title="Speak Windows Narrator version">▶ Listen</button>
-          </div>
-        </div>
-      `;
-    }
-
-    return `
-      <div class="speech-step-card ${barrierClass} highlightable" data-filtered-index="${idx}" title="Click to locate and highlight this element on the page">
-        <div class="speech-step-top">
-          <div class="speech-step-left">
-            <span class="speech-step-num">#${idx + 1}</span>
-            <span class="speech-role-tag">${escapeHtml(step.type)}</span>
-            ${stateBadge}
-          </div>
-          <div class="speech-actions">
-            ${barrierBadge}
-            <button type="button" class="btn-speak-speech" title="Hear announcement aloud">
-              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>
-              <span>Speak</span>
-            </button>
-            <button type="button" class="btn-highlight-speech" title="Locate & highlight this element on the page">
-              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="22" y1="12" x2="18" y2="12"/><line x1="6" y1="12" x2="2" y2="12"/><line x1="12" y1="6" x2="12" y2="2"/><line x1="12" y1="22" x2="12" y2="18"/></svg>
-              <span>Locate</span>
-            </button>
-          </div>
-        </div>
-        <div class="speech-text-bubble">
-          <svg class="bubble-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-          <em>${escapeHtml(announcementText)}</em>
-        </div>
-        ${matrixHtml}
-        <div class="speech-selector">
-          ${escapeHtml(step.selector || 'DOM Element')}
-        </div>
-      </div>
-    `;
-  }).join('');
-
-  // Attach highlight, speak, and matrix audio listeners to speech step cards
-  container.querySelectorAll('.speech-step-card').forEach((cardEl) => {
-    const idx = parseInt(cardEl.getAttribute('data-filtered-index') || '-1', 10);
-    const step = filtered[idx];
-    if (!step) return;
-
-    const btnSpeak = cardEl.querySelector('.btn-speak-speech');
-    const btnLocate = cardEl.querySelector('.btn-highlight-speech');
-
-    btnSpeak?.addEventListener('click', (e) => {
-      e.stopPropagation();
-      isSpeechPlaying = false;
-      isSpeechPaused = false;
-      updatePlayButtonUI(false);
-      speechStepIndex = idx;
-      speakSingleStep(step, idx);
-    });
-
-    // Listeners for comparison matrix individual speaker buttons
-    cardEl.querySelectorAll('.sr-matrix-speak-btn').forEach((speakBtn) => {
-      speakBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        const persona = speakBtn.getAttribute('data-persona') || currentPersona;
-        const text = getStepAnnouncement(step, persona);
-        updateCaptionDisplay(`[${persona.toUpperCase()}] "${text}"`, true);
-        playEarcon(step.isBarrier ? 'barrier' : (step.type === 'Link' ? 'link' : (step.type === 'Landmark' ? 'landmark' : 'control')), persona);
-        if ('speechSynthesis' in window) {
-          window.speechSynthesis.cancel();
-          const utterance = new SpeechSynthesisUtterance(text);
-          utterance.rate = speechRate;
-          const cfg = PERSONA_CONFIG[persona];
-          if (cfg && availableVoices) {
-            const v = availableVoices.find(vx => cfg.voicePattern.test(vx.name));
-            if (v) utterance.voice = v;
-          }
-          utterance.onend = () => updateCaptionDisplay(text, false);
-          window.speechSynthesis.speak(utterance);
-        }
-      });
-    });
-
-    const triggerHighlight = (btnTarget) => {
-      updateCaptionDisplay(getStepAnnouncement(step), false);
-      if (step.selector) {
-        highlightElementOnPage(step.selector, {
-          impact: step.isBarrier ? 'serious' : 'minor',
-          help: step.isBarrier ? `Auditory Barrier (${step.type})` : `Screen Reader: ${step.type}`,
-          wcagRule: step.spokenText,
-          target: step.selector,
-        }, btnTarget || btnLocate);
-      }
-    };
-
-    btnLocate?.addEventListener('click', (e) => {
-      e.stopPropagation();
-      triggerHighlight(btnLocate);
-    });
-
-    cardEl.addEventListener('click', (e) => {
-      if (e.target.closest('.btn-speak-speech') || e.target.closest('.btn-highlight-speech') || e.target.closest('.sr-matrix-speak-btn')) return;
-      triggerHighlight(btnLocate);
-    });
-  });
-}
-
-/**
- * Renders the sequential keyboard tab navigation order list
- * @param {Object} tabOrder
- */
-function renderTabOrderSequence(tabOrder) {
-  const container = document.getElementById('tab-sequence-list');
-  const badgeEl = document.getElementById('tab-order-status-badge');
-  const countEl = document.getElementById('tab-total-count');
-  const flowEl = document.getElementById('tab-flow-status');
-  const posEl = document.getElementById('tab-positive-count');
-  const skipEl = document.getElementById('tab-skip-status');
-
-  if (!container) return;
-
-  if (!tabOrder || !tabOrder.items || tabOrder.items.length === 0) {
-    if (badgeEl) badgeEl.textContent = '0 Controls';
-    if (countEl) countEl.textContent = '0';
-    if (flowEl) flowEl.textContent = 'N/A';
-    if (posEl) posEl.textContent = '0';
-    if (skipEl) skipEl.textContent = 'Not Checked';
-    container.innerHTML = `
-      <div style="padding: 24px; text-align: center; color: var(--text-muted); font-size: 11.5px;">
-        No focusable interactive elements detected on this page.
-      </div>
-    `;
-    return;
-  }
-
-  // Update summary strip
-  if (badgeEl) {
-    badgeEl.textContent = `${tabOrder.totalElements} Controls (${tabOrder.flowStatus})`;
-    if (tabOrder.flowStatus === 'Sequential') {
-      badgeEl.style.color = '#34d399';
-      badgeEl.style.borderColor = 'rgba(16, 185, 129, 0.4)';
-    } else if (tabOrder.flowStatus === 'Needs Review') {
-      badgeEl.style.color = '#fbbf24';
-      badgeEl.style.borderColor = 'rgba(245, 158, 11, 0.4)';
-    } else {
-      badgeEl.style.color = '#f87171';
-      badgeEl.style.borderColor = 'rgba(239, 68, 68, 0.4)';
-    }
-  }
-
-  if (countEl) countEl.textContent = String(tabOrder.totalElements);
-  if (flowEl) {
-    flowEl.textContent = tabOrder.flowStatus;
-    flowEl.style.color = tabOrder.flowStatus === 'Sequential' ? '#34d399' : (tabOrder.flowStatus === 'Needs Review' ? '#fbbf24' : '#f87171');
-  }
-  if (posEl) {
-    posEl.textContent = String(tabOrder.positiveTabIndexCount);
-    if (tabOrder.positiveTabIndexCount > 0) {
-      posEl.classList.add('has-warn');
-      posEl.style.color = '#f87171';
-    } else {
-      posEl.classList.remove('has-warn');
-      posEl.style.color = '#34d399';
-    }
-  }
-  if (skipEl) {
-    skipEl.textContent = tabOrder.hasSkipLink ? 'Detected' : 'Missing';
-    skipEl.style.color = tabOrder.hasSkipLink ? '#34d399' : '#fbbf24';
-  }
-
-  // Render cards
-  container.innerHTML = tabOrder.items.map((item, idx) => {
-    const isWarn = item.hasPositiveTabIndex || item.hasVisualJump || item.hasMissingName;
-    const isRadioGroup = !!item.isRadioGroupLeader;
-    return `
-      <div class="tab-sequence-card ${isWarn ? 'card-warn' : ''} ${isRadioGroup ? 'card-radiogroup' : ''}" data-step-index="${idx}">
-        <div class="tab-card-left">
-          <span class="tab-badge-num ${isWarn ? 'warn' : ''} ${isRadioGroup ? 'radiogroup' : ''}">
-            ${isRadioGroup ? '🔘' : item.step}
-          </span>
-          <div class="tab-card-info">
-            <div class="tab-card-title-row">
-              <span class="tab-role-tag">&lt;${escapeHtml(item.tagName)}&gt;</span>
-              ${isRadioGroup ? `<span class="tab-badge-radiogroup">Radio Group (1 of ${item.radioGroupTotal})</span>` : ''}
-              <span class="tab-name-text" title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</span>
-            </div>
-            <span class="tab-selector-text" title="${escapeHtml(item.selector)}">${escapeHtml(item.selector)}</span>
-            ${isRadioGroup ? `<span class="tab-radiogroup-hint">ℹ️ Tab enters group • Next Tab exits group • Arrow keys navigate choices</span>` : ''}
-            ${item.warningText ? `<span class="tab-warning-text">⚠️ ${escapeHtml(item.warningText)}</span>` : ''}
-          </div>
-        </div>
-        <button type="button" class="btn-locate-tab" title="Scroll to and highlight this tab stop on page">
-          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="22" y1="12" x2="18" y2="12"/><line x1="6" y1="12" x2="2" y2="12"/><line x1="12" y1="6" x2="12" y2="2"/><line x1="12" y1="22" x2="12" y2="18"/></svg>
-          <span>Locate</span>
-        </button>
-      </div>
-    `;
-  }).join('');
-
-  // Attach Locate event listeners
-  container.querySelectorAll('.tab-sequence-card').forEach((cardEl) => {
-    const idx = parseInt(cardEl.getAttribute('data-step-index') || '-1', 10);
-    const item = tabOrder.items[idx];
-    if (!item || !item.selector) return;
-
-    const btnLocate = /** @type {HTMLElement|null} */ (cardEl.querySelector('.btn-locate-tab'));
-
-    const triggerLocate = () => {
-      highlightElementOnPage(item.selector, {
-        impact: item.hasPositiveTabIndex ? 'serious' : (item.hasVisualJump ? 'moderate' : 'minor'),
-        help: `Tab Order Stop #${item.step} (${item.role}): ${item.name}`,
-        wcagRule: item.warningText || `Tab Sequence #${item.step} (${item.tagName})`,
-        target: item.selector,
-        text: item.name,
-      }, btnLocate);
-    };
-
-    btnLocate?.addEventListener('click', (e) => {
-      e.stopPropagation();
-      triggerLocate();
-    });
-
-    cardEl.addEventListener('click', (e) => {
-      if (e.target.closest('.btn-locate-tab')) return;
-      triggerLocate();
-    });
-  });
-}
-
-// =============================================================================
-// LINK HEALTH & BROKEN LINK AUDITOR
-// =============================================================================
-
-/**
- * Initializes or updates the Link Checker UI from cached or new audit data
- * @param {Array<Object>} [rawLinks]
- * @param {Object} [existingAudit]
- */
-function initOrRenderLinkAudit(rawLinks = [], existingAudit = null) {
-  if (existingAudit && existingAudit.items) {
-    currentLinkAudit = existingAudit;
-  } else if (rawLinks && rawLinks.length > 0) {
-    if (!currentLinkAudit || currentLinkAudit.items?.length === 0) {
-      currentLinkAudit = {
-        total: rawLinks.length,
-        broken: 0,
-        warning: 0,
-        working: 0,
-        items: rawLinks.map((l, i) => ({
-          ...l,
-          index: l.index || i + 1,
-          health: 'checking', // 'broken' | 'warning' | 'working' | 'checking'
-          statusCode: null,
-          statusText: 'Pending check...',
-        })),
-        isComplete: false,
-      };
-    }
-  }
-
-  renderLinksSection();
-}
-
-/**
- * Audits all page links for HTTP status codes, broken in-page anchors, and network errors
- * @param {Array<Object>} rawLinks
- * @param {boolean} [forceRecheck=false]
- */
-async function auditPageLinks(rawLinks = [], forceRecheck = false) {
-  if (!rawLinks || rawLinks.length === 0) return;
-  if (isLinkAuditRunning && !forceRecheck) return;
-
-  isLinkAuditRunning = true;
-
-  // Initialize items
-  const items = rawLinks.map((l, idx) => ({
-    ...l,
-    index: l.index || idx + 1,
-    health: 'checking',
-    statusCode: /** @type {number|null} */ (null),
-    statusText: 'Checking status...',
-  }));
-
-  currentLinkAudit = {
-    total: items.length,
-    broken: 0,
-    warning: 0,
-    working: 0,
-    items,
-    isComplete: false,
-  };
-
-  renderLinksSection();
-
-  const progressWrapper = document.getElementById('link-progress-wrapper');
-  const progressBar = document.getElementById('link-progress-bar-fill');
-  const progressLabel = document.getElementById('link-progress-label');
-  const btnRecheck = document.getElementById('btn-recheck-links');
-
-  if (btnRecheck) {
-    btnRecheck.setAttribute('disabled', 'true');
-    btnRecheck.style.opacity = '0.5';
-    btnRecheck.style.pointerEvents = 'none';
-  }
-
-  if (progressWrapper) progressWrapper.style.display = 'flex';
-  if (progressBar) {
-    progressBar.className = 'link-progress-bar-fill';
-    progressBar.style.width = '0%';
-  }
-  if (progressLabel) progressLabel.textContent = `Auditing ${items.length} links...`;
-
-  // First pass: Process static conditions (in-page anchors, empty href, protocol links)
-  const httpUrlsToFetch = new Set();
-  const urlMap = new Map(); // url -> item indices
-
-  items.forEach((item, idx) => {
-    if (item.isEmpty) {
-      item.health = 'warning';
-      item.statusCode = 0;
-      item.statusText = 'Empty or missing href attribute';
-    } else if (item.isHash) {
-      if (item.rawHref === '#' || item.rawHref === '') {
-        item.health = 'warning';
-        item.statusCode = 0;
-        item.statusText = 'Generic hash placeholder href="#"';
-      } else if (item.hashTargetExists || item.rawHref.toLowerCase() === '#top' || /^#(\/|!)/.test(item.rawHref)) {
-        item.health = 'working';
-        item.statusCode = 200;
-        item.statusText = item.rawHref.toLowerCase() === '#top'
-          ? 'Standard top-of-page anchor'
-          : (/^#(\/|!)/.test(item.rawHref) ? 'Client-side SPA route' : 'In-page anchor element verified in DOM');
-      } else {
-        item.health = 'warning';
-        item.statusCode = 0;
-        item.statusText = `In-page anchor target "${item.rawHref}" not detected in initial DOM`;
-      }
-    } else if (item.isProtocol) {
-      if (/^javascript:/i.test(item.rawHref)) {
-        item.health = 'warning';
-        item.statusCode = 0;
-        item.statusText = 'JavaScript execution link (anti-pattern)';
-      } else {
-        item.health = 'working';
-        item.statusCode = 200;
-        item.statusText = `Protocol handler (${item.rawHref.split(':')[0]}:)`;
-      }
-    } else if (item.url && /^https?:/i.test(item.url)) {
-      httpUrlsToFetch.add(item.url);
-      if (!urlMap.has(item.url)) urlMap.set(item.url, []);
-      urlMap.get(item.url).push(idx);
-    } else {
-      item.health = 'warning';
-      item.statusCode = 0;
-      item.statusText = 'Unsupported link schema or invalid URL';
-    }
-  });
-
-  const uniqueUrls = Array.from(httpUrlsToFetch);
-  const totalHttp = uniqueUrls.length;
-  let completedHttp = 0;
-
-  /**
-   * Checks a single HTTP/HTTPS URL with genuine browser-authentic GET verification.
-   * Completely eliminates false 404s caused by servers rejecting HEAD requests,
-   * missing browser Accept headers, or Range headers.
-   * @param {string} url
-   */
-  async function verifyUrl(url) {
-    if (!url || !/^https?:/i.test(url)) return;
-
-    // Separate clean fetch URL from client-side anchor fragment
-    const [fetchUrl] = url.split('#');
-    if (!fetchUrl) return;
-
-    let result = {
-      statusCode: 0,
-      statusText: '',
-      health: 'warning',
-    };
-
-    const browserHeaders = {
-      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-      'Accept-Language': 'en-US,en;q=0.9',
-      'Cache-Control': 'no-cache',
-    };
-
-    try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 10000); // 10s timeout
-
-      let response = null;
-      try {
-        // Standard GET request: resolves immediately upon receiving HTTP headers,
-        // matching genuine browser navigation behavior and eliminating false 404s.
-        response = await fetch(fetchUrl, {
-          method: 'GET',
-          headers: browserHeaders,
-          signal: controller.signal,
-          redirect: 'follow',
-          cache: 'no-cache',
-          credentials: 'omit',
-        });
-      } catch (fetchErr) {
-        const fErr = /** @type {any} */ (fetchErr);
-        if (fErr?.name === 'AbortError' || fErr?.name === 'TimeoutError') {
-          clearTimeout(timeoutId);
-          result.statusCode = 408;
-          result.statusText = 'Request Timeout (10s response limit)';
-          result.health = 'broken';
-          applyResult(url, result);
-          return;
-        }
-
-        // Check if destination host is reachable via no-cors probe before treating as error
-        try {
-          const probeController = new AbortController();
-          const probeTimeout = setTimeout(() => probeController.abort(), 4000);
-          const probeRes = await fetch(fetchUrl, {
-            method: 'GET',
-            mode: 'no-cors',
-            signal: probeController.signal,
-            cache: 'no-cache',
-          });
-          clearTimeout(probeTimeout);
-          if (probeRes && (probeRes.type === 'opaque' || probeRes.status === 200)) {
-            result.statusCode = 200;
-            result.statusText = '200 OK (Host reachable, cross-origin protected)';
-            result.health = 'working';
-            applyResult(url, result);
-            return;
-          }
-        } catch (_) {}
-
-        throw fetchErr;
-      } finally {
-        clearTimeout(timeoutId);
-      }
-
-      if (response) {
-        const code = response.status;
-        result.statusCode = code;
-
-        // Cancel the response body stream immediately to save bandwidth
-        if (response.body) {
-          try { await response.body.cancel(); } catch (_) {}
-        }
-
-        if (code >= 200 && code < 300) {
-          result.health = 'working';
-          result.statusText = `${code} ${response.statusText || 'OK'}`;
-        } else if (code >= 300 && code < 400) {
-          result.health = 'working';
-          result.statusText = `${code} Redirect`;
-        } else if (code === 404) {
-          // Confirmed 404 Not Found from actual GET request
-          result.health = 'broken';
-          result.statusText = '404 Not Found';
-        } else if (code === 410) {
-          // Confirmed 410 Gone
-          result.health = 'broken';
-          result.statusText = '410 Gone';
-        } else if (code === 401 || code === 403) {
-          // Page exists but requires auth or Cloudflare/bot challenge - NOT a broken link
-          result.health = 'warning';
-          result.statusText = `${code} Access Restricted / Bot Protection`;
-        } else if (code === 405) {
-          result.health = 'warning';
-          result.statusText = '405 Method Not Allowed (Target requires specific interaction)';
-        } else if (code === 429) {
-          result.health = 'warning';
-          result.statusText = '429 Rate Limited (Server temporarily throttled verification)';
-        } else if (code >= 500 && code <= 599) {
-          // Confirmed 5xx server failure
-          result.health = 'broken';
-          result.statusText = `${code} ${response.statusText || 'Server Error'}`;
-        } else if (code >= 400 && code < 500) {
-          // Other 4xx client errors
-          result.health = 'broken';
-          result.statusText = `${code} ${response.statusText || 'Client Error'}`;
-        } else {
-          result.health = 'warning';
-          result.statusText = `${code} Status Response`;
-        }
-      }
-    } catch (netErr) {
-      const nErr = /** @type {any} */ (netErr);
-      const msg = nErr?.message || '';
-      if (nErr?.name === 'AbortError' || nErr?.name === 'TimeoutError') {
-        result.statusCode = 408;
-        result.statusText = 'Request Timeout (10s response limit)';
-        result.health = 'broken';
-      } else if (msg.includes('net::ERR_NAME_NOT_RESOLVED') || msg.includes('ENOTFOUND') || /dns/i.test(msg)) {
-        result.statusCode = 0;
-        result.statusText = 'DNS Resolution Failed (Domain does not exist)';
-        result.health = 'broken';
-      } else if (msg.includes('net::ERR_CONNECTION_REFUSED')) {
-        result.statusCode = 0;
-        result.statusText = 'Connection Refused by Destination Host';
-        result.health = 'broken';
-      } else if (msg.includes('Failed to fetch') || msg.includes('NetworkError')) {
-        result.statusCode = 0;
-        result.statusText = 'Network Verification Blocked by Client/Browser Policy';
-        result.health = 'warning';
-      } else {
-        result.statusCode = 0;
-        result.statusText = `Network error: ${msg || 'Connection issue'}`;
-        result.health = 'warning';
-      }
-    }
-
-    applyResult(url, result);
-  }
-
-  function applyResult(targetUrl, result) {
-    const indices = urlMap.get(targetUrl) || [];
-    indices.forEach(idx => {
-      items[idx].statusCode = result.statusCode;
-      items[idx].statusText = result.statusText;
-      items[idx].health = result.health;
-    });
-
-    completedHttp++;
-    const percent = totalHttp > 0 ? Math.round((completedHttp / totalHttp) * 100) : 100;
-    if (progressBar) progressBar.style.width = `${percent}%`;
-    if (progressLabel) progressLabel.textContent = `Auditing links... ${completedHttp}/${totalHttp} (${percent}%)`;
-  }
-
-  // Concurrency pool (limit: 6 concurrent connections to avoid browser socket exhaustion)
-  const CONCURRENCY = 6;
-  /** @type {Promise<void>[]} */
-  const pool = [];
-  for (let i = 0; i < uniqueUrls.length; i++) {
-    const p = verifyUrl(uniqueUrls[i]).then(() => {
-      const pIdx = pool.indexOf(p);
-      if (pIdx !== -1) pool.splice(pIdx, 1);
-    });
-    pool.push(p);
-    if (pool.length >= CONCURRENCY) {
-      await Promise.race(pool);
-    }
-  }
-  await Promise.all(pool);
-
-  // Mark complete
-  const brokenCount = items.filter(it => it.health === 'broken').length;
-  const warningCount = items.filter(it => it.health === 'warning').length;
-  const workingCount = items.filter(it => it.health === 'working').length;
-
-  currentLinkAudit = {
-    total: items.length,
-    broken: brokenCount,
-    warning: warningCount,
-    working: workingCount,
-    items,
-    isComplete: true,
-    timestamp: new Date().toISOString(),
-  };
-
-  if (currentAudit) {
-    currentAudit.linkAudit = currentLinkAudit;
-    try {
-      const storageArea = chrome.storage?.session || chrome.storage?.local;
-      if (storageArea) {
-        storageArea.set({ currentAudit });
-      }
-    } catch (_) {}
-  }
-
-  isLinkAuditRunning = false;
-
-  if (btnRecheck) {
-    btnRecheck.removeAttribute('disabled');
-    btnRecheck.style.opacity = '1';
-    btnRecheck.style.pointerEvents = 'auto';
-  }
-
-  if (progressBar) {
-    progressBar.style.width = '100%';
-    progressBar.className = brokenCount > 0 ? 'link-progress-bar-fill has-errors' : 'link-progress-bar-fill complete';
-  }
-  if (progressLabel) {
-    progressLabel.textContent = brokenCount > 0
-      ? `Audit complete: ${brokenCount} broken link${brokenCount === 1 ? '' : 's'} detected!`
-      : `Audit complete: All ${items.length} links verified successfully.`;
-  }
-
-  renderLinksSection();
-}
-
-/**
- * Renders the Link Checker summary metrics, status badge, and filter tab counts
- */
-function renderLinksSection() {
-  if (!currentLinkAudit) return;
-
-  const total = currentLinkAudit.total || 0;
-  const broken = currentLinkAudit.broken || 0;
-  const warning = currentLinkAudit.warning || 0;
-  const working = currentLinkAudit.working || 0;
-
-  // Header status badge
-  const badge = document.getElementById('link-checker-status-badge');
-  if (badge) {
-    badge.className = 'link-checker-status-badge';
-    if (!currentLinkAudit.isComplete && isLinkAuditRunning) {
-      badge.textContent = `Checking (${total} links)...`;
-    } else if (broken > 0) {
-      badge.classList.add('has-broken');
-      badge.textContent = `⚠️ ${broken} Broken Link${broken === 1 ? '' : 's'}`;
-    } else if (currentLinkAudit.isComplete) {
-      badge.classList.add('all-valid');
-      badge.textContent = `✓ All ${total} Links Valid`;
-    } else {
-      badge.textContent = `${total} Links`;
-    }
-  }
-
-  // Summary strip
-  const elTotal = document.getElementById('link-total-count');
-  const elBroken = document.getElementById('link-broken-count');
-  const elWarning = document.getElementById('link-warning-count');
-  const elWorking = document.getElementById('link-working-count');
-
-  if (elTotal) elTotal.textContent = String(total);
-  if (elBroken) elBroken.textContent = String(broken);
-  if (elWarning) elWarning.textContent = String(warning);
-  if (elWorking) elWorking.textContent = String(working);
-
-  // Filter tabs
-  const fAll = document.getElementById('link-count-all');
-  const fBroken = document.getElementById('link-count-broken');
-  const fWarning = document.getElementById('link-count-warning');
-  const fWorking = document.getElementById('link-count-working');
-
-  if (fAll) fAll.textContent = String(total);
-  if (fBroken) fBroken.textContent = String(broken);
-  if (fWarning) fWarning.textContent = String(warning);
-  if (fWorking) fWorking.textContent = String(working);
-
-
-  // Overview Failure KPI Count
-  const kpiLinksCount = document.getElementById('kpi-links-count');
-  const kpiLinksCard = document.getElementById('kpi-card-links');
-  if (kpiLinksCount) {
-    if (!currentLinkAudit.isComplete && isLinkAuditRunning) {
-      kpiLinksCount.textContent = '...';
-      kpiLinksCard?.classList.remove('kpi-has-failures', 'kpi-zero-failures');
-    } else {
-      kpiLinksCount.textContent = broken === 0 ? '✓ 0' : String(broken);
-      if (kpiLinksCard) {
-        if (broken > 0) {
-          kpiLinksCard.classList.remove('kpi-zero-failures');
-          kpiLinksCard.classList.add('kpi-has-failures');
-        } else {
-          kpiLinksCard.classList.remove('kpi-has-failures');
-          kpiLinksCard.classList.add('kpi-zero-failures');
-        }
-      }
-    }
-  }
-
-  renderLinkCards();
-}
-
-/**
- * Renders the list of link cards according to the current filter
- */
-function renderLinkCards() {
-  const container = document.getElementById('link-sequence-list');
-  if (!container || !currentLinkAudit) return;
-
-  const items = currentLinkAudit.items || [];
-  const filtered = items.filter(item => {
-    if (currentLinkFilter === 'all') return true;
-    return item.health === currentLinkFilter;
-  });
-
-  if (filtered.length === 0) {
-    let emptyMsg = 'No links matching the selected filter.';
-    if (currentLinkFilter === 'broken') {
-      emptyMsg = '🎉 No broken links detected! All URLs and anchors resolved properly.';
-    } else if (currentLinkFilter === 'warning') {
-      emptyMsg = 'No link warnings or restricted endpoints detected.';
-    }
-    container.innerHTML = `
-      <div style="padding: 24px; text-align: center; color: var(--text-muted); font-size: 11.5px; display: flex; align-items: center; justify-content: center; gap: 8px;">
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="${currentLinkFilter === 'broken' ? '#10b981' : '#64748b'}" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></svg>
-        <span>${escapeHtml(emptyMsg)}</span>
-      </div>
-    `;
-    return;
-  }
-
-  // Render cards (capped at 100 max for high performance)
-  const displayItems = filtered.slice(0, 100);
-  const isTruncated = filtered.length > 100;
-
-  container.innerHTML = displayItems.map((item) => {
-    let cardClass = 'link-card';
-    let badgeClass = 'link-status-badge';
-    let badgeText = item.statusText || 'Unknown';
-
-    if (item.health === 'broken') {
-      cardClass += ' card-broken';
-      if (item.statusCode === 404) {
-        badgeClass += ' status-404';
-        badgeText = '404 NOT FOUND';
-      } else if (item.statusCode >= 500) {
-        badgeClass += ' status-500';
-        badgeText = `${item.statusCode} SERVER ERROR`;
-      } else {
-        badgeClass += ' status-error';
-        badgeText = item.statusCode ? `${item.statusCode} ERROR` : 'NETWORK ERROR';
-      }
-    } else if (item.health === 'warning') {
-      cardClass += ' card-warning';
-      badgeClass += ' status-redirect';
-      if (item.statusCode === 401 || item.statusCode === 403) {
-        badgeText = `${item.statusCode} RESTRICTED`;
-      } else if (item.statusCode === 405) {
-        badgeText = '405 NOT ALLOWED';
-      } else if (item.statusCode === 429) {
-        badgeText = '429 THROTTLED';
-      } else if (item.isEmpty) {
-        badgeText = 'EMPTY HREF';
-      } else if (item.isHash) {
-        badgeText = 'ANCHOR TARGET';
-      } else {
-        badgeText = item.statusCode ? `${item.statusCode} WARNING` : 'LINK WARNING';
-      }
-    } else if (item.health === 'working') {
-      cardClass += ' card-valid';
-      if (item.isHash) {
-        badgeClass += ' status-anchor';
-        badgeText = 'ANCHOR VALID';
-      } else {
-        badgeClass += ' status-200';
-        badgeText = item.statusCode ? `${item.statusCode} OK` : 'WORKING';
-      }
-    } else {
-      badgeClass += ' status-checking';
-      badgeText = 'CHECKING...';
-    }
-
-    const isBroken = item.health === 'broken';
-    const isExternal = item.isExternal;
-    const isBlank = item.target === '_blank';
-    const isAnchor = item.isHash;
-
-    const displayUrl = item.url || item.rawHref || '(No URL)';
-
-    return `
-      <div class="${cardClass}" data-link-index="${item.index}">
-        <div class="link-card-left">
-          <span class="${badgeClass}">${escapeHtml(badgeText)}</span>
-          <div class="link-card-info">
-            <div class="link-card-title-row">
-              <span class="link-text" title="${escapeHtml(item.text)}">${escapeHtml(item.text)}</span>
-            </div>
-            <a href="${escapeHtml(item.url || '#')}" class="link-url" target="_blank" rel="noopener noreferrer" title="${escapeHtml(displayUrl)}">
-              ${escapeHtml(displayUrl)}
-            </a>
-            <div class="link-tag-group">
-              ${isExternal ? '<span class="link-tag link-tag-external">External ↗</span>' : '<span class="link-tag">Internal</span>'}
-              ${isBlank ? '<span class="link-tag link-tag-blank">target="_blank"</span>' : ''}
-              ${isAnchor ? '<span class="link-tag link-tag-anchor">In-Page Anchor #</span>' : ''}
-            </div>
-            ${item.statusText && item.statusText !== badgeText ? `<div class="link-diag-box"><strong>Diagnostics:</strong> ${escapeHtml(item.statusText)}</div>` : ''}
-          </div>
-        </div>
-        <div class="element-item-actions">
-          ${isBroken && item.selector ? `
-            <button type="button" class="btn-preview-fix ${activePreviewFixes.has(item.selector) ? 'active' : ''}" data-target="${escapeHtml(item.selector)}" title="Preview button role or fallback destination">
-              <span class="fix-btn-icon">${activePreviewFixes.has(item.selector) ? '↩' : '✨'}</span>
-              <span class="fix-btn-text">${activePreviewFixes.has(item.selector) ? 'Revert Fix' : 'Preview Fix'}</span>
-            </button>
-          ` : ''}
-          <button type="button" class="btn-locate-link ${isBroken ? 'btn-locate-broken' : ''}" title="Locate and spotlight this link on page">
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="22" y1="12" x2="18" y2="12"/><line x1="6" y1="12" x2="2" y2="12"/><line x1="12" y1="6" x2="12" y2="2"/><line x1="12" y1="22" x2="12" y2="18"/></svg>
-            <span>Spotlight</span>
-          </button>
-        </div>
-      </div>
-    `;
-  }).join('') + (isTruncated ? `
-    <div style="padding: 12px; text-align: center; color: var(--text-muted); font-size: 11px;">
-      Showing first 100 of ${filtered.length} links. Filter by category above to view specific results.
-    </div>
-  ` : '');
-
-  // Attach Spotlight event listeners
-  container.querySelectorAll('.link-card').forEach((cardEl) => {
-    const idx = parseInt(cardEl.getAttribute('data-link-index') || '-1', 10);
-    const item = (currentLinkAudit.items || []).find(it => it.index === idx);
-    if (!item || !item.selector) return;
-
-    const btnSpotlight = /** @type {HTMLElement|null} */ (cardEl.querySelector('.btn-locate-link'));
-
-    const triggerLocate = () => {
-      highlightElementOnPage(item.selector, {
-        impact: item.health === 'broken' ? 'critical' : (item.health === 'warning' ? 'serious' : 'minor'),
-        help: item.health === 'broken'
-          ? `Broken Link (${item.statusText})`
-          : `Link: "${item.text}" → ${item.url || item.rawHref}`,
-        wcagRule: item.health === 'broken'
-          ? `WCAG 2.4.4 / 404 Error: ${item.statusText}`
-          : `WCAG 2.4.4 Link Purpose: Status ${item.statusCode || 'OK'}`,
-        target: item.selector,
-      }, btnSpotlight);
-    };
-
-    const btnFixLink = /** @type {HTMLElement|null} */ (cardEl.querySelector('.btn-preview-fix'));
-    btnFixLink?.addEventListener('click', (e) => {
-      e.stopPropagation();
-      if (item.selector) {
-        togglePreviewFix(item.selector, 'link', { suggestedUrl: '#' }, btnFixLink);
-      }
-    });
-
-    btnSpotlight?.addEventListener('click', (e) => {
-      e.stopPropagation();
-      triggerLocate();
-    });
-
-    cardEl.addEventListener('click', (e) => {
-      const target = /** @type {Element|null} */ (e.target);
-      if (target && (target.closest('.btn-locate-link') || target.closest('.btn-preview-fix') || target.closest('a'))) return;
-      triggerLocate();
-    });
-  });
-}
-
-/**
- * Resolves available fix configuration for a failing node
- * @param {Object} violation
- * @param {Object} node
- * @returns {{type: string, payload: Object} | null}
- */
-function getFixConfigForNode(violation, node) {
-  if (!node) return null;
-
-  // 1. Pre-calculated color contrast fix
-  if (node.contrastFix && (node.contrastFix.suggestedFg || node.contrastFix.suggestedBg)) {
-    return {
-      type: 'contrast',
-      payload: {
-        suggestedFg: node.contrastFix.suggestedFg,
-        suggestedBg: node.contrastFix.suggestedBg,
-        suggestedRatio: node.contrastFix.suggestedRatio || '4.5:1',
-      }
-    };
-  }
-
-  // 2. Interactive hover contrast failure
-  if (node.hoverDetails) {
-    return {
-      type: 'contrast',
-      payload: {
-        suggestedFg: node.hoverDetails.restingFg || node.contrastFix?.suggestedFg,
-        suggestedBg: node.hoverDetails.restingBg || node.contrastFix?.suggestedBg,
-        suggestedRatio: node.hoverDetails.requiredRatio || '4.5:1',
-      }
-    };
-  }
-
-  // 3. ARIA semantic label diagnosis
-  if (node.ariaDetails && node.ariaDetails.recommendedLabel) {
-    return {
-      type: 'aria-label',
-      payload: {
-        recommendedLabel: node.ariaDetails.recommendedLabel,
-      }
-    };
-  }
-
-  // 4. Links must be distinguishable without relying on color (WCAG 1.4.1)
-  if (violation.id === 'link-in-text-block' || /distinguishable without relying on color/i.test(violation.help || '')) {
-    return {
-      type: 'link-distinguish',
-      payload: {
-        decoration: 'underline',
-        offset: '3px',
-      }
-    };
-  }
-
-  // 5. Target size (WCAG 2.2 2.5.8)
-  if (violation.id === 'target-size') {
-    return {
-      type: 'target-size',
-      payload: {
-        minWidth: 24,
-        minHeight: 24,
-      }
-    };
-  }
-
-  // 6. Missing Image Alternative Text
-  if (violation.id === 'image-alt' || violation.id === 'input-image-alt') {
-    return {
-      type: 'image-alt',
-      payload: {
-        recommendedAlt: 'Accessible image content summary',
-      }
-    };
-  }
-
-  // 7. Redundant Image Alt Text ("image of...")
-  if (violation.id === 'image-redundant-alt') {
-    let clean = 'Visual illustration';
-    const altMatch = (node.html || '').match(/alt=["']([^"']+)["']/i);
-    if (altMatch) {
-      clean = altMatch[1].replace(/^(image|photo|picture|graphic|icon)\s*(of)?\s*/i, '').trim() || 'Visual summary';
-    }
-    return {
-      type: 'image-alt',
-      payload: {
-        recommendedAlt: clean,
-      }
-    };
-  }
-
-  // 8. Unnamed Buttons, Links, or Form Inputs
-  if (violation.id === 'button-name') {
-    return {
-      type: 'button-name',
-      payload: {
-        recommendedLabel: 'Action Button',
-      }
-    };
-  }
-  if (violation.id === 'link-name') {
-    return {
-      type: 'link-name',
-      payload: {
-        recommendedLabel: 'Navigation Link',
-      }
-    };
-  }
-  if (['label', 'label-title-only', 'select-name', 'input-button-name', 'aria-input-field-name'].includes(violation.id)) {
-    let inferName = 'Form Input';
-    const html = node.html || '';
-    const placeholderMatch = html.match(/placeholder=["']([^"']+)["']/i);
-    const nameMatch = html.match(/name=["']([^"']+)["']/i);
-    const idMatch = html.match(/id=["']([^"']+)["']/i);
-    const typeMatch = html.match(/type=["']([^"']+)["']/i);
-
-    if (placeholderMatch) inferName = placeholderMatch[1];
-    else if (nameMatch) inferName = nameMatch[1].replace(/[-_]/g, ' ');
-    else if (idMatch) inferName = idMatch[1].replace(/[-_]/g, ' ');
-    else if (typeMatch) inferName = `${typeMatch[1]} field`;
-    else if (/select/i.test(html)) inferName = 'Select option';
-
-    return {
-      type: 'aria-label',
-      payload: {
-        recommendedLabel: inferName.charAt(0).toUpperCase() + inferName.slice(1),
-      }
-    };
-  }
-
-  // 9. Empty Headings
-  if (violation.id === 'empty-heading') {
-    return {
-      type: 'aria-label',
-      payload: {
-        recommendedLabel: 'Section Heading',
-      }
-    };
-  }
-
-  // 10. Frame Titles
-  if (violation.id === 'frame-title' || violation.id === 'frame-title-unique') {
-    return {
-      type: 'frame-title',
-      payload: {
-        recommendedTitle: 'Embedded content frame',
-      }
-    };
-  }
-
-  // 11. HTML Document Language
-  if (['html-has-lang', 'html-lang-valid', 'valid-lang'].includes(violation.id)) {
-    return {
-      type: 'html-lang',
-      payload: {
-        lang: 'en',
-      }
-    };
-  }
-
-  // 12. Interactive element inside aria-hidden
-  if (violation.id === 'aria-hidden-focus') {
-    return {
-      type: 'aria-hidden-focus',
-      payload: {},
-    };
-  }
-
-  // 13. Tabindex & Focus Order
-  if (violation.id === 'tabindex' || violation.id === 'focus-order-semantics') {
-    return {
-      type: 'tabindex',
-      payload: {
-        tabindex: '0',
-      }
-    };
-  }
-
-  // 14. General Color Contrast rule fallback
-  if (violation.id === 'color-contrast' || violation.id === 'color-contrast-enhanced') {
-    return {
-      type: 'contrast',
-      payload: {
-        suggestedFg: '#ffffff',
-        suggestedBg: '#090e11',
-        suggestedRatio: '7.0:1',
-      }
-    };
-  }
-
-  return null;
-}
-
-/**
- * Toggles a live in-DOM simulated fix on the active page
- * @param {string} targetSelector
- * @param {string} fixType
- * @param {Object} fixPayload
- * @param {HTMLElement} [buttonEl]
- */
-async function togglePreviewFix(targetSelector, fixType, fixPayload, buttonEl) {
-  try {
-    const activeTab = await getActiveWebTab();
-    if (!activeTab || !activeTab.id) return;
-
-    const isActive = activePreviewFixes.has(targetSelector);
-
-    if (isActive) {
-      // Revert live preview fix
-      await chrome.scripting.executeScript({
-        target: { tabId: activeTab.id },
-        func: (sel) => {
-          // @ts-ignore
-          if (typeof window.__auditforgeRevertFix === 'function') {
-            return window.__auditforgeRevertFix(sel);
-          }
-          return { success: false };
-        },
-        args: [targetSelector],
-      });
-
-      activePreviewFixes.delete(targetSelector);
-      if (buttonEl) {
-        buttonEl.classList.remove('active');
-        buttonEl.innerHTML = '<span class="fix-btn-icon">✨</span> <span class="fix-btn-text">Preview Fix</span>';
-        buttonEl.title = 'Preview accessible fix live on the page';
-      }
-    } else {
-      // Apply live preview fix
-      const res = await chrome.scripting.executeScript({
-        target: { tabId: activeTab.id },
-        func: (sel, type, payload) => {
-          // @ts-ignore
-          if (typeof window.__auditforgePreviewFix === 'function') {
-            return window.__auditforgePreviewFix(sel, type, payload);
-          }
-          return { success: false, error: 'Preview fix engine not available in page' };
-        },
-        args: [targetSelector, fixType, fixPayload],
-      });
-
-      const result = res[0]?.result;
-      if (result && result.success) {
-        activePreviewFixes.add(targetSelector);
-        if (buttonEl) {
-          buttonEl.classList.add('active');
-          buttonEl.innerHTML = '<span class="fix-btn-icon">↩</span> <span class="fix-btn-text">Revert Fix</span>';
-          buttonEl.title = 'Revert live fix back to original DOM state';
-        }
-      }
-    }
-  } catch (err) {
-    console.warn('[Auditor] Could not toggle preview fix:', err);
-  }
-}
-
-/**
- * Renders the formatted issues table & accordion list
- */
-function renderIssuesList() {
-  const container = document.getElementById('issues-list');
-  if (!container || !currentAudit) return;
-
-  container.innerHTML = '';
-
-  const filtered = currentAudit.violations.filter((v) => {
-    if (currentFilter === 'all') return true;
-    return v.impact === currentFilter;
-  });
-
-  if (filtered.length === 0) {
-    container.innerHTML = `
-      <div style="padding: 24px; text-align: center; color: var(--text-muted); font-size: 11.5px; display: flex; align-items: center; justify-content: center; gap: 8px;">
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></svg>
-        <span>No issues identified under this severity category.</span>
-      </div>
-    `;
-    return;
-  }
-
-  filtered.forEach((v) => {
-    const card = document.createElement('div');
-    card.className = 'violation-card';
-
-    // Element rows
-    const elementsHtml = (v.nodes || []).slice(0, 5).map((node, idx) => {
-      let contrastBadge = '';
-      if (node.contrastFix) {
-        const cf = node.contrastFix;
-        if (node.hoverDetails) {
-          contrastBadge = `
-            <div style="margin-top: 5px; padding: 5px 8px; background: rgba(249, 115, 22, 0.12); border: 1px solid rgba(249, 115, 22, 0.3); border-radius: 4px; font-size: 10px;">
-              <span style="color: #fb923c; font-weight: 700;">Hover Contrast:</span> ${escapeHtml(node.hoverDetails.hoverRatio)} on hover vs ${escapeHtml(node.hoverDetails.requiredRatio)} required (Resting: ${escapeHtml(node.hoverDetails.restingRatio)})
-              <div style="color: var(--text-dim); margin-top: 2px;">
-                Fix: <strong style="color: #38bdf8; font-family: monospace;">${escapeHtml(cf.suggestedFg)}</strong> (${escapeHtml(cf.suggestedRatio)} PASS)
-              </div>
-            </div>
-          `;
-        } else {
-          contrastBadge = `
-            <div style="margin-top: 5px; padding: 5px 8px; background: rgba(239, 68, 68, 0.12); border: 1px solid rgba(239, 68, 68, 0.25); border-radius: 4px; font-size: 10px;">
-              <span style="color: #f87171; font-weight: 700;">Contrast Ratio:</span> ${escapeHtml(cf.currentRatio)} vs ${escapeHtml(cf.requiredRatio)} required
-              <span style="color: var(--text-dim); margin-left: 6px;">➔ Recommended: <strong style="color: #38bdf8; font-family: monospace;">${escapeHtml(cf.suggestedFg)}</strong></span>
-            </div>
-          `;
-        }
-      }
-
-      let ariaBadge = '';
-      if (node.ariaDetails) {
-        const ad = node.ariaDetails;
-        ariaBadge = `
-          <div style="margin-top: 5px; padding: 5px 8px; background: rgba(56, 189, 248, 0.1); border: 1px solid rgba(56, 189, 248, 0.25); border-radius: 4px; font-size: 10px;">
-            <div style="color: #38bdf8; font-weight: 700;">ARIA Assessment: ${escapeHtml(ad.diagnosis)}</div>
-            <div style="color: var(--text-dim); margin-top: 2px;">
-              Current: <code style="color: #f87171;">${escapeHtml(ad.ariaLabel)}</code> &nbsp;➔&nbsp; Fix: <strong style="color: #34d399;">${escapeHtml(ad.recommendedLabel)}</strong>
-            </div>
-          </div>
-        `;
-      }
-
-      let srBadge = '';
-      if (node.srDetails) {
-        const sd = node.srDetails;
-        srBadge = `
-          <div style="margin-top: 5px; padding: 5px 8px; background: rgba(168, 85, 247, 0.1); border: 1px solid rgba(168, 85, 247, 0.25); border-radius: 4px; font-size: 10px;">
-            <div style="color: #c084fc; font-weight: 700;">Screen Reader Assessment: ${escapeHtml(sd.diagnosis)}</div>
-            <div style="color: var(--text-dim); margin-top: 2px;">
-              Announced: <code style="color: #f87171;">${escapeHtml(sd.currentText)}</code> &nbsp;➔&nbsp; Fix: <strong style="color: #34d399;">${escapeHtml(sd.recommended)}</strong>
-            </div>
-          </div>
-        `;
-      }
-
-      const fixConfig = getFixConfigForNode(v, node);
-      const isFixActive = Boolean(node.target && activePreviewFixes.has(node.target));
-      const previewBtnHtml = fixConfig && node.target ? `
-        <button type="button" class="btn-preview-fix ${isFixActive ? 'active' : ''}" data-target="${escapeHtml(node.target)}" title="${isFixActive ? 'Revert live fix back to original DOM state' : 'Preview accessible fix live on the page'}">
-          <span class="fix-btn-icon">${isFixActive ? '↩' : '✨'}</span>
-          <span class="fix-btn-text">${isFixActive ? 'Revert Fix' : 'Preview Fix'}</span>
-        </button>
-      ` : '';
-
-      return `
-        <div class="element-item highlightable" data-node-index="${idx}" title="Click to navigate to and highlight this element on the page">
-          <div class="element-item-header">
-            <div class="element-meta" style="margin-bottom: 0;">
-              <strong>Element ${idx + 1} of ${v.affectedCount}:</strong>
-              <code>${escapeHtml(node.target || 'DOM Root')}</code>
-            </div>
-            <div class="element-item-actions">
-              ${previewBtnHtml}
-              <button type="button" class="btn-highlight-element" title="Scroll to and highlight this element on the active page">
-                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="22" y1="12" x2="18" y2="12"/><line x1="6" y1="12" x2="2" y2="12"/><line x1="12" y1="6" x2="12" y2="2"/><line x1="12" y1="22" x2="12" y2="18"/></svg>
-                <span>Highlight</span>
-              </button>
-            </div>
-          </div>
-          <div class="element-meta" style="margin-top: 5px;">
-            <strong>HTML:</strong>
-            <code style="color: var(--text-muted); background: rgba(0,0,0,0.3); padding: 1px 4px; border-radius: 3px;">${escapeHtml(node.html || '<element />')}</code>
-          </div>
-          ${contrastBadge}
-          ${ariaBadge}
-          ${srBadge}
-        </div>
-      `;
-    }).join('');
-
-    const moreNote = v.affectedCount > 5
-      ? `<div style="font-size: 10px; color: var(--text-dim); font-style: italic; padding: 2px 6px;">+ ${v.affectedCount - 5} additional elements itemized in PDF report.</div>`
-      : '';
-
-    card.innerHTML = `
-      <div class="violation-card-header">
-        <div class="violation-title-group">
-          <span class="severity-tag severity-${v.impact}">${v.impact}</span>
-          <span class="violation-rule-name">${escapeHtml(v.help)}</span>
-          <span class="violation-badge-count">(${v.affectedCount})</span>
-        </div>
-        <div class="violation-header-actions">
-          <button type="button" class="btn-highlight-header" title="Highlight first affected element on page">
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="22" y1="12" x2="18" y2="12"/><line x1="6" y1="12" x2="2" y2="12"/><line x1="12" y1="6" x2="12" y2="2"/><line x1="12" y1="22" x2="12" y2="18"/></svg>
-            <span>Locate</span>
-          </button>
-          <span class="expand-icon">▼ Details</span>
-        </div>
-      </div>
-
-      <div class="violation-details-panel">
-        <p class="violation-desc">${escapeHtml(v.description)} &nbsp;•&nbsp; <strong>${escapeHtml(v.wcagRule)}</strong></p>
-        
-        <div class="element-items-wrapper">
-          ${elementsHtml}
-          ${moreNote}
-        </div>
-
-        <div class="code-box">
-          <div class="code-box-header">
-            <span>RECOMMENDED CODE FIX:</span>
-            <button class="btn-copy">Copy Fix</button>
-          </div>
-          <pre class="code-snippet"><code>${escapeHtml(v.remediationCode)}</code></pre>
-        </div>
-      </div>
-    `;
-
-    // Toggle expand
-    card.querySelector('.violation-card-header')?.addEventListener('click', (e) => {
-      if (e.target.closest('.btn-highlight-header')) return;
-      card.classList.toggle('open');
-      const icon = card.querySelector('.expand-icon');
-      if (icon) icon.textContent = card.classList.contains('open') ? '▲ Less' : '▼ Details';
-    });
-
-    // Quick Highlight from card header
-    const headerHighlightBtn = card.querySelector('.btn-highlight-header');
-    headerHighlightBtn?.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const firstNode = (v.nodes || [])[0];
-      if (firstNode && firstNode.target) {
-        highlightElementOnPage(firstNode.target, {
-          impact: v.impact,
-          help: v.help,
-          wcagRule: v.wcagRule,
-          description: v.description,
-          target: firstNode.target,
-          html: firstNode.html,
-          remediationCode: v.remediationCode,
-          contrastFix: firstNode.contrastFix,
-          ariaDetails: firstNode.ariaDetails,
-          srDetails: firstNode.srDetails,
-        }, headerHighlightBtn);
-      }
-    });
-
-    // Element row highlight & preview fix clicks
-    const elItems = card.querySelectorAll('.element-item');
-    elItems.forEach((elItem) => {
-      const idx = parseInt(elItem.getAttribute('data-node-index') || '-1', 10);
-      const node = (v.nodes || [])[idx];
-      if (!node || !node.target) return;
-
-      const btn = elItem.querySelector('.btn-highlight-element');
-      const btnFix = elItem.querySelector('.btn-preview-fix');
-      const fixConfig = getFixConfigForNode(v, node);
-
-      btnFix?.addEventListener('click', (e) => {
-        e.stopPropagation();
-        if (fixConfig && node.target) {
-          togglePreviewFix(node.target, fixConfig.type, fixConfig.payload, btnFix);
-        }
-      });
-
-      const triggerHighlight = (btnTarget) => {
-        highlightElementOnPage(node.target, {
-          impact: v.impact,
-          help: v.help,
-          wcagRule: v.wcagRule,
-          description: v.description,
-          target: node.target,
-          html: node.html,
-          remediationCode: v.remediationCode,
-          contrastFix: node.contrastFix,
-          ariaDetails: node.ariaDetails,
-          srDetails: node.srDetails,
-        }, btnTarget || btn);
-      };
-
-      btn?.addEventListener('click', (e) => {
-        e.stopPropagation();
-        triggerHighlight(btn);
-      });
-
-      elItem.addEventListener('click', (e) => {
-        if (e.target.closest('.btn-highlight-element') || e.target.closest('.btn-preview-fix')) return;
-        triggerHighlight(btn);
-      });
-    });
-
-    // Copy Code Button
-    card.querySelector('.btn-copy')?.addEventListener('click', (e) => {
-      e.stopPropagation();
-      navigator.clipboard.writeText(v.remediationCode);
-      const btn = card.querySelector('.btn-copy');
-      if (btn) {
-        btn.textContent = 'Copied!';
-        setTimeout(() => { btn.textContent = 'Copy Fix'; }, 1500);
-      }
-    });
-
-    container.appendChild(card);
-  });
-}
-
-/**
- * Triggers in-page highlighting for a specific target selector by querying
- * the active tab and executing the in-page spotlight overlay script.
- * @param {string|string[]} selector
- * @param {Object} [meta]
- * @param {HTMLElement} [triggerButton]
- */
-async function highlightElementOnPage(selector, meta = {}, triggerButton = null) {
-  if (!selector) return;
-
-  const selStr = Array.isArray(selector) ? selector.join(' ') : String(selector || '');
-  if (selStr.includes('__auditforge') || selStr.includes('__af_')) {
-    console.warn("Matt's QA Extension: Rejected attempt to highlight an extension element:", selector);
-    return;
-  }
-
-  const originalHtml = triggerButton ? triggerButton.innerHTML : '';
-
-  try {
-    // 1. Prioritize currently active tab in the user's active window (the page directly behind popup)
-    let [targetTab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-    if (!targetTab || !targetTab.id) {
-      [targetTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    }
-    // 2. Fallback to recorded tab ID if needed
-    if ((!targetTab || !targetTab.id) && currentTabId) {
-      try {
-        targetTab = await chrome.tabs.get(currentTabId);
-      } catch (_) {}
-    }
-
-    if (!targetTab || !targetTab.id) {
-      console.warn("Matt's QA Extension: No active tab found to highlight element.");
-      if (triggerButton) {
-        triggerButton.innerHTML = '<span>⚠️ No Tab</span>';
-        setTimeout(() => { triggerButton.innerHTML = originalHtml; }, 2000);
-      }
-      return;
-    }
-
-    currentTabId = targetTab.id;
-
-    if (triggerButton) {
-      triggerButton.classList.add('btn-located');
-      triggerButton.innerHTML = '<span>✓ Spotlight</span>';
-      setTimeout(() => {
-        triggerButton.innerHTML = originalHtml;
-        triggerButton.classList.remove('btn-located');
-      }, 2200);
-    }
-
-    // Execute in-page spotlight overlay on the target tab.
-    // NOTE: We deliberately do NOT call chrome.windows.update or chrome.tabs.update
-    // here because focusing another window causes Chrome to automatically close
-    // this extension popup!
-    await chrome.scripting.executeScript({
-      target: { tabId: targetTab.id },
-      func: runInPageHighlight,
-      args: [selector, meta],
-    });
-  } catch (err) {
-    console.error("Matt's QA Extension: Failed to trigger in-page highlight:", err);
-    if (triggerButton) {
-      triggerButton.classList.remove('btn-located');
-      triggerButton.innerHTML = '<span>⚠️ Notice</span>';
-      setTimeout(() => { triggerButton.innerHTML = originalHtml; }, 2200);
-    }
-  }
-}
-
-/**
- * Self-contained highlight function injected directly into the target tab.
- * Uses window.__auditforgeHighlight if available, or renders the spotlight overlay directly.
- * @param {string|string[]} targetSelector
- * @param {Object} meta
- */
-function runInPageHighlight(targetSelector, meta = {}) {
-  // Reject selectors explicitly targeting extension elements
-  const rawTargetStr = typeof targetSelector === 'string' ? targetSelector.trim() : (Array.isArray(targetSelector) ? targetSelector.join(' ') : String(targetSelector || ''));
-  if (rawTargetStr.includes('__auditforge') || rawTargetStr.includes('__af_')) {
-    return;
-  }
-
-  // @ts-ignore
-  if (typeof window.__auditforgeHighlight === 'function') {
-    // @ts-ignore
-    return window.__auditforgeHighlight(targetSelector, meta);
-  }
-
-  // Fallback if content script was not yet injected into page
-  // @ts-ignore
-  if (typeof window.__auditforgeClearHighlight === 'function') {
-    // @ts-ignore
-    window.__auditforgeClearHighlight();
-  } else {
-    document.getElementById('__auditforge_overlay_root__')?.remove();
-    document.getElementById('__auditforge_overlay_styles__')?.remove();
-    document.getElementById('__auditforge_highlight_overlay__')?.remove();
-    document.getElementById('__auditforge_toast__')?.remove();
-  }
-
-  function isExtensionElement(el) {
-    if (!el || el === document.documentElement || el === document.body) return false;
-    try {
-      if (el.id && (el.id.startsWith('__auditforge') || el.id.startsWith('__af_'))) return true;
-      const cls = (typeof el.className === 'string' ? el.className : (el.getAttribute ? el.getAttribute('class') : '')) || '';
-      if (cls.includes('__auditforge') || cls.includes('__af_')) return true;
-      if (typeof el.closest === 'function') {
-        return !!el.closest('[id^="__auditforge"], [id^="__af_"], [class*="__auditforge"], [class*="__af_"]');
-      }
-    } catch (_) {}
-    return false;
-  }
-
-  function safeEscape(str) {
-    return String(str || '').replace(/[&<>"']/g, (c) => ({
-      '&': '&amp;',
-      '<': '&lt;',
-      '>': '&gt;',
-      '"': '&quot;',
-      "'": '&#039;',
-    }[c]));
-  }
-
-  function findElement(target) {
-    if (!target) return null;
-    if (typeof Element !== 'undefined' && target instanceof Element) {
-      return isExtensionElement(target) ? null : target;
-    }
-
-    const tStr = typeof target === 'string' ? target.trim() : (Array.isArray(target) ? target.join(' ') : String(target || ''));
-    if (tStr.includes('__auditforge') || tStr.includes('__af_')) return null;
-
-    if (Array.isArray(target)) {
-      if (target.length === 1) return findElement(target[0]);
-      let currentDoc = document;
-      let foundEl = null;
-      for (let i = 0; i < target.length; i++) {
-        const sel = target[i];
-        if (!currentDoc || sel.includes('__auditforge') || sel.includes('__af_')) break;
-        try {
-          foundEl = currentDoc.querySelector(sel);
-          if (foundEl && (foundEl.tagName === 'IFRAME' || foundEl.tagName === 'FRAME')) {
-            try {
-              // @ts-ignore
-              currentDoc = foundEl.contentDocument || foundEl.contentWindow?.document;
-            } catch (_) {
-              return isExtensionElement(foundEl) ? null : foundEl;
-            }
-          }
-        } catch (_) {
-          break;
-        }
-      }
-      if (foundEl && !isExtensionElement(foundEl)) return foundEl;
-    }
-
-    const selectorStr = typeof target === 'string' ? target.trim() : String(target).trim();
-    if (!selectorStr) return null;
-
-    if (selectorStr === 'html' || selectorStr === ':root') return document.documentElement;
-    if (selectorStr === 'body') return document.body;
-
-    try {
-      const el = document.querySelector(selectorStr);
-      if (el && !isExtensionElement(el)) return el;
-    } catch (_) {}
-
-    if (selectorStr.startsWith('#') && !selectorStr.includes(' ') && !selectorStr.includes('>') && !selectorStr.includes(':')) {
-      try {
-        const el = document.getElementById(selectorStr.slice(1));
-        if (el && !isExtensionElement(el)) return el;
-      } catch (_) {}
-    }
-
-    try {
-      const escaped = selectorStr.replace(/#([^\s>+~.:[\]]+)/g, (_, id) => `#${CSS.escape(id)}`);
-      const el = document.querySelector(escaped);
-      if (el && !isExtensionElement(el)) return el;
-    } catch (_) {}
-
-    const parts = selectorStr.split(/\s*>\s*|\s+/).filter(Boolean);
-    if (parts.length > 1) {
-      for (let i = parts.length - 1; i >= 0; i--) {
-        try {
-          const seg = parts[i];
-          if (seg.includes('__auditforge') || seg.includes('__af_')) continue;
-          const el = document.querySelector(seg);
-          if (el && !isExtensionElement(el)) return el;
-        } catch (_) {}
-      }
-    }
-
-    if (meta && meta.html) {
-      try {
-        const tagMatch = meta.html.match(/^<([a-z0-9-]+)/i);
-        if (tagMatch) {
-          const tag = tagMatch[1];
-          const candidates = Array.from(document.querySelectorAll(tag));
-          const snippet = meta.html.slice(0, 45);
-          const matched = candidates.find((c) => !isExtensionElement(c) && c.outerHTML && c.outerHTML.includes(snippet));
-          if (matched) return matched;
-        }
-      } catch (_) {}
-    }
-
-    if (meta && (meta.text || meta.target)) {
-      const queryText = (meta.text || '').trim().toLowerCase();
-      if (queryText) {
-        const interactives = Array.from(document.querySelectorAll('button, a, input, select, textarea, [role="button"], [role="link"], h1, h2, h3, h4, img'));
-        const matched = interactives.find((el) => !isExtensionElement(el) && ((el.innerText || el.textContent || '')).trim().toLowerCase().includes(queryText));
-        if (matched) return matched;
-      }
-    }
-
+    s.append(val);
+    const t1 = svg('text', { class: 'ring-num', x: '50%', y: '50%', 'text-anchor': 'middle', 'dominant-baseline': 'central', dy: '-4' });
+    t1.textContent = String(score);
+    const t2 = svg('text', { class: 'ring-sub', x: '50%', y: '50%', 'text-anchor': 'middle', dy: size * 0.22 });
+    t2.textContent = '/ 100';
+    s.append(t1, t2);
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      val.setAttribute('stroke-dashoffset', String(c * (1 - Math.max(0, Math.min(100, score)) / 100)));
+    }));
+    return s;
+  }
+
+  function renderScorecard(r) {
+    const s = r.summary;
+    clear($('score-ring')).append(scoreRing(s.score, 'Compliance score'));
+    const grade = $('grade-badge');
+    grade.textContent = s.grade;
+    grade.className = `grade-badge tone-${toneForScore(s.score)}`;
+    grade.setAttribute('aria-label', `Grade ${s.grade}`);
+    const risk = $('risk-pill');
+    risk.textContent = `${s.risk} risk`;
+    risk.className = `chip tone-${RISK_TONE[s.risk] || 'muted'}`;
+    $('result-title').textContent = r.meta.title || 'Untitled page';
+    const url = r.meta.url || state.tabUrl;
+    $('result-url').textContent = url;
+    $('result-url').title = url;
+    const when = r.meta.timestamp ? new Date(r.meta.timestamp) : null;
+    const parts = [];
+    if (when && !isNaN(when)) parts.push(when.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }));
+    if (r.meta.durationMs) parts.push(`${(r.meta.durationMs / 1000).toFixed(1)}s`);
+    if (r.meta.axeVersion) parts.push(`axe ${r.meta.axeVersion}`);
+    $('result-stamp').textContent = parts.join(' · ');
+
+    const stats = clear($('count-chips'));
+    IMPACTS.forEach((k) => stats.append(h('li', { class: 'sev-stat' },
+      h('span', { class: `sev-stat-n tone-${SEV_TONE[k]}` }, s.counts[k]),
+      h('span', { class: 'sev-stat-l' }, h('span', { class: `dot sev-${k}`, 'aria-hidden': 'true' }), IMPACT_LABEL[k]))));
+    $('score-foot').textContent = `${plural(s.totalNodes, 'affected element')} · ${plural(s.passes, 'passed check')}${s.incomplete ? ` · ${s.incomplete} to review` : ''}`;
+
+    const warn = clear($('stage-warnings'));
+    if (r.__stageErrors.length) {
+      warn.append(h('p', { class: 'banner-title' }, h('span', { 'aria-hidden': 'true' }, '⚠️ '), 'Some audit stages did not complete. Results may be partial.'),
+        h('ul', null, r.__stageErrors.map((e) => h('li', null, e.stage ? `${e.stage}: ${e.message}` : e.message))));
+      warn.hidden = false;
+    } else warn.hidden = true;
+  }
+
+  function renderResults(r) {
+    renderScorecard(r);
+    renderWcag();
+    renderMobile();
+    renderScreenReader();
+    renderTabOrder();
+    renderVision();
+    renderLinks();
+    $('badge-wcag').textContent = plural(r.violations.length, 'rule');
+    $('badge-sr').textContent = `${r.screenReader.score}/100`;
+    $('badge-links').textContent = plural(r.links.total, 'link');
+  }
+
+  /* ------------------------------------------------------------------------
+     Shared building blocks: Locate button, rows, chips, copy, UI preservation
+     ------------------------------------------------------------------------ */
+  async function locate(selector, meta) {
+    if (!selector) return;
+    const res = await callPage('__auditforgeHighlight', [selector, Object.assign({ impact: 'minor', ruleId: '', title: '', wcag: [], message: '' }, meta || {})]);
+    if (res.ok === false) toast(`Could not highlight: ${res.error || 'unknown error'}`);
+    else if (res.found === false) toast('Element not found. The page may have changed since the audit.');
+    else toast('Highlighted on the page.');
+  }
+
+  /** The primary per-row action: filled cyan "🎯 Locate". */
+  function locateBtn(selector, meta, labelCtx, key) {
+    return h('button', {
+      type: 'button', class: 'btn btn-locate', 'aria-label': `Locate ${labelCtx || selector}`, title: `Locate ${selector} on the page`,
+      dataset: key ? { key } : null, disabled: selector ? null : true,
+      onclick: () => locate(selector, meta)
+    }, h('span', { class: 'ico', 'aria-hidden': 'true' }, '🎯'), 'Locate');
+  }
+
+  function chip(text, tone, title) {
+    return h('span', { class: `chip tone-${tone || 'muted'}`, title: title || null }, text);
+  }
+
+  /** CONTRACT §10.1 visibility chip: amber for hidden-visual, neutral for sr-only. */
+  function visChip(item) {
+    if (!item) return null;
+    if (item.visibility === 'hidden-visual') return chip('Hidden from view', 'amber', item.visibilityReason || 'Not perceivable on screen');
+    if (item.visibility === 'sr-only') return chip('Screen-reader only', 'muted', item.visibilityReason || 'Visually hidden on purpose');
     return null;
   }
 
-  const targetEl = findElement(targetSelector);
-  const selectorString = Array.isArray(targetSelector) ? targetSelector.join(' ') : String(targetSelector);
-  const isDocumentScope = !targetEl || targetEl === document.documentElement || targetEl === document.body || selectorString === 'html' || selectorString === 'body';
-
-  const severityPalette = {
-    critical: { border: '#ef4444', glow: 'rgba(239, 68, 68, 0.45)', bg: 'rgba(239, 68, 68, 0.12)' },
-    serious:  { border: '#f97316', glow: 'rgba(249, 115, 22, 0.45)', bg: 'rgba(249, 115, 22, 0.12)' },
-    moderate: { border: '#f59e0b', glow: 'rgba(245, 158, 11, 0.45)', bg: 'rgba(245, 158, 11, 0.12)' },
-    minor:    { border: '#38bdf8', glow: 'rgba(56, 189, 248, 0.45)', bg: 'rgba(56, 189, 248, 0.12)' },
-    default:  { border: '#6366f1', glow: 'rgba(99, 102, 241, 0.45)', bg: 'rgba(99, 102, 241, 0.12)' },
-  };
-  const color = severityPalette[(meta.impact || 'default').toLowerCase()] || severityPalette.default;
-
-  let styles = document.getElementById('__auditforge_overlay_styles__');
-  if (!styles) {
-    styles = document.createElement('style');
-    styles.id = '__auditforge_overlay_styles__';
-    styles.textContent = `
-      @keyframes __af_fade_in { from { opacity: 0; } to { opacity: 1; } }
-      @keyframes __af_pulse_ring {
-        0% { box-shadow: 0 0 0 99999px rgba(11, 15, 25, 0.72), 0 0 0 0px var(--af-glow), 0 0 20px var(--af-border); }
-        50% { box-shadow: 0 0 0 99999px rgba(11, 15, 25, 0.72), 0 0 0 8px rgba(0,0,0,0), 0 0 35px var(--af-border); }
-        100% { box-shadow: 0 0 0 99999px rgba(11, 15, 25, 0.72), 0 0 0 0px var(--af-glow), 0 0 20px var(--af-border); }
-      }
-      @keyframes __af_slide_up {
-        from { opacity: 0; transform: translateY(12px) scale(0.97); }
-        to { opacity: 1; transform: translateY(0) scale(1); }
-      }
-      .__af_root {
-        position: fixed; inset: 0; z-index: 2147483640; pointer-events: auto;
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-        color: #f8fafc; animation: __af_fade_in 0.2s ease-out;
-      }
-      .__af_backdrop {
-        position: fixed; inset: 0; background: rgba(11, 15, 25, 0.75);
-        backdrop-filter: blur(2px); -webkit-backdrop-filter: blur(2px); cursor: pointer;
-      }
-      .__af_spotlight {
-        position: fixed; box-sizing: border-box; border: 2.5px solid var(--af-border);
-        border-radius: 8px; background: transparent;
-        box-shadow: 0 0 0 99999px rgba(11, 15, 25, 0.72), 0 0 25px var(--af-border);
-        pointer-events: none; animation: __af_pulse_ring 2s infinite ease-in-out;
-        transition: top 0.05s linear, left 0.05s linear, width 0.05s linear, height 0.05s linear;
-      }
-      .__af_spotlight .af_corner { position: absolute; width: 10px; height: 10px; border-color: #ffffff; border-style: solid; }
-      .__af_spotlight .af_tl { top: -2px; left: -2px; border-width: 3px 0 0 3px; border-top-left-radius: 4px; }
-      .__af_spotlight .af_tr { top: -2px; right: -2px; border-width: 3px 3px 0 0; border-top-right-radius: 4px; }
-      .__af_spotlight .af_bl { bottom: -2px; left: -2px; border-width: 0 0 3px 3px; border-bottom-left-radius: 4px; }
-      .__af_spotlight .af_br { bottom: -2px; right: -2px; border-width: 0 3px 3px 0; border-bottom-right-radius: 4px; }
-      .__af_toolbar {
-        position: fixed; max-width: 480px; min-width: 320px;
-        background: #040809; backdrop-filter: blur(16px);
-        -webkit-backdrop-filter: blur(16px); border: 1px solid #1b6f7e;
-        border-top: 3.5px solid var(--af-border); border-radius: 10px;
-        box-shadow: 0 20px 45px rgba(0, 0, 0, 0.95), 0 0 25px var(--af-glow);
-        padding: 14px 16px; pointer-events: auto; z-index: 2147483645;
-        animation: __af_slide_up 0.25s cubic-bezier(0.16, 1, 0.3, 1);
-      }
-      .__af_toolbar_header { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
-      .__af_badge {
-        background: var(--af-border); color: #000000; padding: 2px 8px; border-radius: 4px;
-        font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.5px;
-      }
-      .__af_rule_title { font-size: 12px; font-weight: 700; color: #e2ebed; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-      .__af_btn_close {
-        background: rgba(255, 255, 255, 0.08); border: 1px solid rgba(27, 111, 126, 0.3); color: #868180;
-        width: 22px; height: 22px; border-radius: 50%; display: flex; align-items: center; justify-content: center;
-        cursor: pointer; font-size: 12px; line-height: 1; transition: all 0.15s ease;
-      }
-      .__af_btn_close:hover { background: rgba(239, 68, 68, 0.3); border-color: #ef4444; color: #ffffff; }
-      .__af_desc { font-size: 11px; line-height: 1.45; color: #868180; margin-bottom: 8px; }
-      .__af_meta_row {
-        font-size: 10px; background: #000000; border: 1px solid rgba(27, 111, 126, 0.35);
-        border-radius: 5px; padding: 5px 8px; margin-bottom: 6px; word-break: break-all; font-family: monospace; color: #0D9FBA;
-      }
-      .__af_diag_box {
-        background: rgba(245, 158, 11, 0.12); border: 1px solid rgba(245, 158, 11, 0.3);
-        border-radius: 5px; padding: 6px 8px; font-size: 10.5px; margin-bottom: 8px; color: #fef3c7;
-      }
-      .__af_toolbar_actions {
-        display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 10px;
-        padding-top: 8px; border-top: 1px solid rgba(27, 111, 126, 0.3);
-      }
-      .__af_btn_action {
-        background: #080f12; border: 1px solid rgba(27, 111, 126, 0.35);
-        color: #868180; padding: 4px 10px; border-radius: 5px; font-size: 11px; font-weight: 600; cursor: pointer; transition: all 0.15s ease;
-      }
-      .__af_btn_action:hover { background: rgba(27, 111, 126, 0.3); border-color: #0D9FBA; color: #0D9FBA; }
-    `;
-    document.head.appendChild(styles);
+  function selText(selector) {
+    return h('code', { class: 'sel', title: selector || '' }, selector || '(no selector)');
   }
 
-  const root = document.createElement('div');
-  root.id = '__auditforge_overlay_root__';
-  root.className = '__af_root';
-  root.style.setProperty('--af-border', color.border);
-  root.style.setProperty('--af-glow', color.glow);
-
-  const backdrop = document.createElement('div');
-  backdrop.className = '__af_backdrop';
-  backdrop.title = 'Click anywhere to dismiss overlay (or press Escape)';
-  if (isDocumentScope) {
-    backdrop.style.background = 'rgba(11, 15, 25, 0.75)';
-    backdrop.style.backdropFilter = 'blur(2px)';
-  } else {
-    backdrop.style.background = 'transparent';
-    backdrop.style.backdropFilter = 'none';
+  /** Generic compact row. */
+  function row({ lead, title, sub, sel, chips, actions, cls, data, extra }) {
+    const chipEls = arr(chips).filter(Boolean);
+    return h('li', { class: `row${cls ? ' ' + cls : ''}`, dataset: data || null },
+      lead || null,
+      h('div', { class: 'row-main' },
+        title != null ? h('span', { class: 'row-title' }, title) : null,
+        sel ? selText(sel) : null,
+        arr(sub).filter(Boolean).map((s) => (s instanceof Node ? s : h('span', { class: 'row-sub' }, s))),
+        chipEls.length ? h('div', { class: 'row-chips' }, chipEls) : null,
+        extra || null),
+      actions ? h('div', { class: 'row-actions' }, actions) : null);
   }
-  root.appendChild(backdrop);
 
-  let spotlight = null;
-  let prevOutline = '';
-  let prevOutlineOffset = '';
-  if (!isDocumentScope && targetEl) {
-    if (targetEl.style) {
-      prevOutline = targetEl.style.outline;
-      prevOutlineOffset = targetEl.style.outlineOffset;
-      targetEl.style.outline = `3.5px dashed ${color.border}`;
-      targetEl.style.outlineOffset = '4px';
+  function stat(n, label, tone) {
+    return h('div', { class: 'stat' }, h('span', { class: `stat-n tone-${tone || 'muted'}` }, n), h('span', { class: 'stat-l' }, label));
+  }
+
+  function sectionH(text, extra) {
+    return h('div', { class: 'section-head' }, h('h3', { class: 'h3' }, text), extra || null);
+  }
+
+  async function copyText(text, btn) {
+    let ok = false;
+    try { await navigator.clipboard.writeText(text); ok = true; } catch (e) {
+      try {
+        const ta = h('textarea', { 'aria-hidden': 'true', style: { position: 'fixed', opacity: '0' } });
+        ta.value = text;
+        document.body.append(ta);
+        ta.select();
+        ok = document.execCommand('copy');
+        ta.remove();
+      } catch (e2) { ok = false; }
     }
-
-    spotlight = document.createElement('div');
-    spotlight.className = '__af_spotlight';
-    spotlight.innerHTML = `
-      <div class="af_corner af_tl"></div>
-      <div class="af_corner af_tr"></div>
-      <div class="af_corner af_bl"></div>
-      <div class="af_corner af_br"></div>
-    `;
-    root.appendChild(spotlight);
-  }
-
-  const toolbar = document.createElement('div');
-  toolbar.className = '__af_toolbar';
-
-  const ruleLabel = meta.help || meta.wcagRule || 'WCAG 2.2 Finding';
-  const impactLabel = (meta.impact || 'ISSUE').toUpperCase();
-  const targetLabel = meta.target || (targetEl ? targetEl.tagName.toLowerCase() : 'Page Scope');
-
-  let diagnosisHtml = '';
-  if (meta.contrastFix) {
-    const cf = meta.contrastFix;
-    diagnosisHtml = `
-      <div class="__af_diag_box">
-        <strong>⚠️ Contrast Failure:</strong> ${safeEscape(cf.currentRatio)} vs ${safeEscape(cf.requiredRatio)} required.
-        <div style="margin-top: 3px;">➔ Fix: Change color to <strong style="color: #38bdf8; font-family: monospace;">${safeEscape(cf.suggestedFg)}</strong> (${safeEscape(cf.suggestedRatio)} PASS)</div>
-      </div>
-    `;
-  } else if (meta.ariaDetails) {
-    const ad = meta.ariaDetails;
-    diagnosisHtml = `
-      <div class="__af_diag_box" style="background: rgba(56, 189, 248, 0.12); border-color: rgba(56, 189, 248, 0.3); color: #e0f2fe;">
-        <strong>🗣️ ARIA Analysis:</strong> ${safeEscape(ad.diagnosis)}
-        <div style="margin-top: 3px;">➔ Recommended Label: <strong style="color: #34d399;">"${safeEscape(ad.recommendedLabel)}"</strong></div>
-      </div>
-    `;
-  } else if (meta.srDetails) {
-    const sd = meta.srDetails;
-    diagnosisHtml = `
-      <div class="__af_diag_box" style="background: rgba(168, 85, 247, 0.12); border-color: rgba(168, 85, 247, 0.3); color: #f3e8ff;">
-        <strong>🎙️ Screen Reader Readout:</strong> ${safeEscape(sd.diagnosis)}
-      </div>
-    `;
-  } else if (meta.spokenText) {
-    diagnosisHtml = `
-      <div class="__af_diag_box" style="background: rgba(168, 85, 247, 0.12); border-color: rgba(168, 85, 247, 0.3); color: #f3e8ff;">
-        <strong>🎙️ VoiceOver Announcement:</strong> ${safeEscape(meta.spokenText)}
-      </div>
-    `;
-  }
-
-  const descText = meta.description || (isDocumentScope
-    ? 'This is a page-wide architectural finding applicable to the whole document structure.'
-    : 'Review the element highlighted in the spotlight on the site.');
-
-  const recenterBtnHtml = !isDocumentScope
-    ? `<button type="button" class="__af_btn_action __af_btn_recenter">🎯 Re-center Spotlight</button>`
-    : '';
-
-  toolbar.innerHTML = `
-    <div class="__af_toolbar_header">
-      <span class="__af_badge">${safeEscape(impactLabel)}</span>
-      <span class="__af_rule_title" title="${safeEscape(ruleLabel)}">${safeEscape(ruleLabel)}</span>
-      <button type="button" class="__af_btn_close" title="Dismiss Overlay (Esc)">✕</button>
-    </div>
-    <div class="__af_desc">${safeEscape(descText)}</div>
-    ${diagnosisHtml}
-    <div class="__af_meta_row">
-      <strong style="color: #94a3b8;">Target:</strong> ${safeEscape(targetLabel)}
-    </div>
-    <div class="__af_toolbar_actions">
-      ${recenterBtnHtml}
-      <button type="button" class="__af_btn_action __af_btn_dismiss">✕ Dismiss</button>
-    </div>
-  `;
-
-  root.appendChild(toolbar);
-  document.body.appendChild(root);
-
-  if (!isDocumentScope && targetEl) {
-    try {
-      targetEl.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' });
-    } catch (_) {
-      try { targetEl.scrollIntoView(true); } catch (_) {}
+    if (btn) {
+      const prev = btn.textContent;
+      btn.textContent = ok ? 'Copied' : 'Copy failed';
+      setTimeout(() => { btn.textContent = prev; }, 1500);
     }
+    announce(ok ? 'Copied to clipboard.' : 'Copy failed.');
   }
 
-  function updateSpotlight() {
-    if (isDocumentScope || !targetEl || !spotlight) {
-      toolbar.style.top = '50%';
-      toolbar.style.left = '50%';
-      toolbar.style.transform = 'translate(-50%, -50%)';
+  /** Re-render without jumps: keeps window/list scroll and keyboard focus. */
+  function preserveUi(fn) {
+    const y = window.scrollY;
+    const lists = [...document.querySelectorAll('.scroll-list[id]')].map((el) => [el.id, el.scrollTop]);
+    const ae = document.activeElement;
+    const key = ae && ae.dataset ? ae.dataset.key : null;
+    fn();
+    lists.forEach(([id, top]) => { const el = $(id); if (el) el.scrollTop = top; });
+    if (key) {
+      const el = [...document.querySelectorAll('[data-key]')].find((x) => x.dataset.key === key);
+      if (el) el.focus({ preventScroll: true });
+    }
+    window.scrollTo(0, y);
+  }
+
+  /** Scrolls `child` into view inside a scroll container only (never the window). */
+  function scrollWithin(container, child) {
+    if (!container || !child) return;
+    const c = container.getBoundingClientRect();
+    const r = child.getBoundingClientRect();
+    if (r.top < c.top) container.scrollTop -= (c.top - r.top) + 8;
+    else if (r.bottom > c.bottom) container.scrollTop += (r.bottom - c.bottom) + 8;
+  }
+
+  function disclosure(id, title, count, content, tone) {
+    const open = state.openSections.has(id);
+    const bodyId = `disc-${id}`;
+    const body = h('div', { class: 'disclosure-body', id: bodyId, hidden: !open }, content);
+    const btn = h('button', {
+      type: 'button', class: 'disclosure-toggle', 'aria-expanded': open ? 'true' : 'false', 'aria-controls': bodyId,
+      onclick: () => {
+        const now = !state.openSections.has(id);
+        if (now) state.openSections.add(id); else state.openSections.delete(id);
+        btn.setAttribute('aria-expanded', now ? 'true' : 'false');
+        body.hidden = !now;
+      }
+    }, h('span', { class: 'grow' }, title), h('span', { class: `count${count && tone ? ` tone-${tone}` : ''}` }, count), h('span', { class: 'chev', 'aria-hidden': 'true' }));
+    return h('div', { class: 'disclosure' }, btn, body);
+  }
+
+  const LIST_PAGE = 12;
+  /** Compact row list; long lists show the first 12 with a "Show more" button. */
+  function listOrEmpty(items, render, emptyText) {
+    if (!items.length) return h('p', { class: 'note' }, emptyText);
+    const ul = h('ul', { class: 'rows' });
+    const wrap = h('div', null, ul);
+    let shown = 0;
+    const more = h('button', { type: 'button', class: 'btn btn-ghost btn-sm' });
+    const page = () => {
+      const next = items.slice(shown, shown + (shown ? 25 : LIST_PAGE));
+      next.forEach((x, k) => ul.append(render(x, shown + k)));
+      shown += next.length;
+      const left = items.length - shown;
+      more.hidden = left <= 0;
+      more.textContent = left > 25 ? `Show 25 more (${left} remaining)` : `Show ${left} more`;
+    };
+    more.addEventListener('click', page);
+    page();
+    wrap.append(more);
+    return wrap;
+  }
+
+  /* ------------------------------------------------------------------------
+     Drawer 1 — WCAG issues (collapsed one-line rule cards)
+     ------------------------------------------------------------------------ */
+  const NODE_PAGE = 10;
+
+  function renderWcagFilters() {
+    const r = state.result;
+    const wrap = clear($('wcag-filters'));
+    IMPACTS.forEach((k) => {
+      const n = r.violations.filter((v) => v.impact === k).length;
+      wrap.append(h('button', {
+        type: 'button', class: 'seg-btn', dataset: { sev: k }, 'aria-pressed': state.sevFilter.has(k) ? 'true' : 'false',
+        onclick: (e) => {
+          if (state.sevFilter.has(k)) state.sevFilter.delete(k); else state.sevFilter.add(k);
+          e.currentTarget.setAttribute('aria-pressed', state.sevFilter.has(k) ? 'true' : 'false');
+          renderWcagList();
+        }
+      }, h('span', { class: `dot sev-${k}`, 'aria-hidden': 'true' }), IMPACT_LABEL[k], h('span', { class: 'n' }, n)));
+    });
+  }
+
+  function matchesSearch(v, q) {
+    if (!q) return true;
+    const hay = [v.id, v.title, v.description, v.source, v.wcag.join(' '), v.tags.join(' '),
+      ...v.nodes.map((n) => `${n.selector} ${n.html} ${n.failureSummary}`)].join(' ').toLowerCase();
+    return q.split(/\s+/).every((t) => hay.includes(t));
+  }
+
+  function renderWcag() {
+    renderWcagFilters();
+    renderWcagList();
+  }
+
+  function renderWcagList() {
+    const r = state.result;
+    const list = clear($('wcag-list'));
+    const q = state.search.trim().toLowerCase();
+    if (!r.violations.length) {
+      list.append(h('p', { class: 'empty' }, 'No WCAG 2.2 AA violations were detected. Manual review is still recommended.'));
+      $('wcag-count').textContent = '';
       return;
     }
-
-    const r = targetEl.getBoundingClientRect();
-    const pad = 8;
-    const minDim = 28;
-    const top = Math.round(r.top - pad);
-    const left = Math.round(r.left - pad);
-    const width = Math.round(Math.max(r.width + pad * 2, minDim));
-    const height = Math.round(Math.max(r.height + pad * 2, minDim));
-
-    spotlight.style.top = `${top}px`;
-    spotlight.style.left = `${left}px`;
-    spotlight.style.width = `${width}px`;
-    spotlight.style.height = `${height}px`;
-
-    const tHeight = toolbar.offsetHeight || 150;
-    const tWidth = toolbar.offsetWidth || 380;
-
-    let tTop = top + height + 14;
-    if (tTop + tHeight > window.innerHeight - 15) {
-      tTop = top - tHeight - 14;
-    }
-    if (tTop < 15) {
-      tTop = Math.max(15, top + 15);
-    }
-
-    const tLeft = Math.max(15, Math.min(left, window.innerWidth - tWidth - 25));
-
-    toolbar.style.top = `${tTop}px`;
-    toolbar.style.left = `${tLeft}px`;
-    toolbar.style.transform = 'none';
+    let shown = 0;
+    IMPACTS.forEach((impact) => {
+      if (!state.sevFilter.has(impact)) return;
+      const items = r.violations.map((v, i) => [v, i]).filter(([v]) => v.impact === impact && matchesSearch(v, q));
+      if (!items.length) return;
+      shown += items.length;
+      list.append(h('div', { class: 'sev-group' },
+        h('h3', { class: `sev-group-h sev-${impact}` }, IMPACT_LABEL[impact], h('span', { class: 'n' }, items.length)),
+        items.map(([v, i]) => ruleCard(v, i))));
+    });
+    if (!shown) list.append(h('p', { class: 'empty' }, 'No issues match the current search and filters.'));
+    $('wcag-count').textContent = shown === r.violations.length ? `${plural(shown, 'rule')}. Select a rule to see affected elements.` : `Showing ${shown} of ${plural(r.violations.length, 'rule')}.`;
   }
 
-  updateSpotlight();
+  function ruleCard(v, i) {
+    const key = String(i);
+    const open = state.openIssues.has(key);
+    const bodyId = `rule-body-${i}`;
+    const body = h('div', { class: 'rule-body', id: bodyId, hidden: !open });
+    const card = h('article', { class: `rule sev-${v.impact}${open ? ' is-open' : ''}` });
+    const sc = v.wcag.length ? `WCAG ${v.wcag.join(', ')}` : 'Best practice';
+    const toggle = h('button', {
+      type: 'button', class: 'rule-toggle', 'aria-expanded': open ? 'true' : 'false', 'aria-controls': bodyId,
+      onclick: () => {
+        const now = !state.openIssues.has(key);
+        if (now) state.openIssues.add(key); else state.openIssues.delete(key);
+        toggle.setAttribute('aria-expanded', now ? 'true' : 'false');
+        card.classList.toggle('is-open', now);
+        body.hidden = !now;
+        if (now && !body.firstChild) fillRuleBody(body, v, i);
+      }
+    },
+    h('span', { class: 'rule-dot', 'aria-hidden': 'true' }),
+    h('span', { class: 'rule-text' },
+      h('span', { class: 'sr-only' }, `${IMPACT_LABEL[v.impact]}: `),
+      h('span', { class: 'rule-title' }, v.title),
+      h('span', { class: 'rule-sc' }, sc)),
+    h('span', { class: 'count', title: plural(v.nodes.length, 'affected element') }, v.nodes.length, h('span', { class: 'sr-only' }, v.nodes.length === 1 ? ' element' : ' elements')),
+    h('span', { class: 'chev', 'aria-hidden': 'true' }));
+    if (open) fillRuleBody(body, v, i);
+    card.append(toggle, body);
+    return card;
+  }
 
-  const intervalId = setInterval(updateSpotlight, 40);
-  setTimeout(() => clearInterval(intervalId), 3500);
-
-  const cleanup = () => {
-    clearInterval(intervalId);
-    window.removeEventListener('scroll', updateSpotlight);
-    window.removeEventListener('resize', updateSpotlight);
-    window.removeEventListener('keydown', onKeyDown);
-    if (targetEl && targetEl.style) {
-      targetEl.style.outline = prevOutline;
-      targetEl.style.outlineOffset = prevOutlineOffset;
+  function fillRuleBody(body, v, i) {
+    clear(body);
+    body.append(h('p', { class: 'rule-desc' }, v.description || v.title,
+      v.helpUrl ? h('a', { href: v.helpUrl, target: '_blank', rel: 'noopener noreferrer' }, 'Learn more', h('span', { class: 'sr-only' }, ` about ${v.id} (opens in a new tab)`)) : null));
+    if (!v.nodes.length) { body.append(h('p', { class: 'note' }, 'No element details were recorded for this rule.')); return; }
+    const limit = state.nodeLimit[i] || NODE_PAGE;
+    const ul = h('ul', { class: 'nodes', 'aria-label': `Affected elements for ${v.title}` });
+    v.nodes.slice(0, limit).forEach((n, j) => ul.append(nodeRow(v, n, i, j)));
+    body.append(ul);
+    if (v.nodes.length > limit) {
+      body.append(h('button', {
+        type: 'button', class: 'btn btn-ghost btn-sm', onclick: () => { state.nodeLimit[i] = limit + 25; fillRuleBody(body, v, i); }
+      }, (v.nodes.length - limit > 25 ? `Show 25 more (${v.nodes.length - limit} remaining)` : `Show ${v.nodes.length - limit} more`)));
     }
-    root.remove();
-  };
+  }
 
-  const onKeyDown = (e) => {
-    if (e.key === 'Escape') cleanup();
-  };
-
-  backdrop.addEventListener('click', cleanup);
-  window.addEventListener('scroll', updateSpotlight, { passive: true });
-  window.addEventListener('resize', updateSpotlight, { passive: true });
-  window.addEventListener('keydown', onKeyDown);
-
-  toolbar.querySelector('.__af_btn_close')?.addEventListener('click', (e) => {
-    e.stopPropagation();
-    cleanup();
-  });
-  toolbar.querySelector('.__af_btn_dismiss')?.addEventListener('click', (e) => {
-    e.stopPropagation();
-    cleanup();
-  });
-  toolbar.querySelector('.__af_btn_recenter')?.addEventListener('click', (e) => {
-    e.stopPropagation();
-    if (targetEl) {
-      targetEl.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' });
+  function nodeRow(v, n, i, j) {
+    const key = `${i}:${j}`;
+    const open = state.openNodes.has(key);
+    const detailsId = `node-details-${i}-${j}`;
+    const meta = { impact: v.impact, ruleId: v.id, title: v.title, wcag: v.wcag, message: n.failureSummary || v.description };
+    const details = h('div', { class: 'node-details', id: detailsId, hidden: !open });
+    if (open) fillNodeDetails(details, n);
+    const dbtn = h('button', {
+      type: 'button', class: 'btn btn-ghost btn-details', 'aria-expanded': open ? 'true' : 'false', 'aria-controls': detailsId,
+      'aria-label': `Details for ${n.selector || 'element'}`,
+      onclick: () => {
+        const now = !state.openNodes.has(key);
+        if (now) state.openNodes.add(key); else state.openNodes.delete(key);
+        dbtn.setAttribute('aria-expanded', now ? 'true' : 'false');
+        details.hidden = !now;
+        if (now && !details.firstChild) fillNodeDetails(details, n);
+      }
+    }, 'Details', h('span', { class: 'chev', 'aria-hidden': 'true' }));
+    const actions = h('div', { class: 'node-actions' }, dbtn);
+    if (n.fix && n.fix.css) {
+      const pbtn = h('button', { type: 'button', class: 'btn btn-preview', dataset: { previewKey: key } });
+      pbtn.addEventListener('click', () => togglePreview(key, n.selector, n.fix.css));
+      updatePreviewButton(pbtn);
+      actions.append(pbtn);
     }
-  });
+    actions.append(locateBtn(n.selector, meta, n.selector));
+    return h('li', { class: 'node' }, h('div', { class: 'node-row' }, selText(n.selector), actions), details);
+  }
 
-  return { success: true, isDocumentScope, target: targetLabel };
-}
+  function fillNodeDetails(wrap, n) {
+    // Full selector only when the row's one-line version is likely truncated.
+    if ((n.selector || '').length > 34) wrap.append(h('div', null, h('div', { class: 'detail-label' }, 'Element'), h('pre', { class: 'code', tabindex: '0', 'aria-label': 'Selector' }, n.selector || '(no selector)')));
+    if (n.failureSummary) wrap.append(h('div', null, h('div', { class: 'detail-label' }, 'Why it fails'), h('p', { class: 'rule-desc' }, n.failureSummary)));
+    if (n.contrast) {
+      const c = n.contrast;
+      // Non-text colour samples (fg bar on bg), so the panel never contains failing text.
+      const swatch = (fg, bg) => h('span', { class: 'swatch', style: { background: bg }, 'aria-hidden': 'true' }, h('span', { class: 'swatch-fg', style: { background: fg } }));
+      wrap.append(h('div', { class: 'contrast' },
+        swatch(c.fg, c.bg),
+        h('span', null, `${c.state === 'hover' ? 'Hover' : 'Rest'} `, h('code', null, c.fg), ' on ', h('code', null, c.bg), ' ', h('strong', { class: 'tone-red' }, `${num(c.ratio).toFixed(2)}:1`), ` / ${c.required}:1`),
+        c.suggestedFg ? swatch(c.suggestedFg, c.bg) : null,
+        c.suggestedFg ? h('span', null, 'Use ', h('code', null, c.suggestedFg), ' ', h('strong', { class: 'tone-green' }, `${num(c.suggestedRatio).toFixed(2)}:1`)) : null));
+    }
+    if (n.html) wrap.append(h('div', null, h('div', { class: 'detail-label' }, 'HTML'), h('pre', { class: 'code', tabindex: '0', 'aria-label': 'HTML snippet' }, n.html)));
+    const fix = n.fix || null;
+    if (fix) {
+      [['css', 'CSS fix'], ['html', 'HTML fix']].forEach(([k, label]) => {
+        if (!fix[k]) return;
+        const copy = h('button', { type: 'button', class: 'btn btn-ghost btn-copy', 'aria-label': `Copy ${label}`, onclick: (e) => copyText(fix[k], e.currentTarget) }, 'Copy');
+        wrap.append(h('div', null, h('div', { class: 'detail-label' }, h('span', { class: 'tone-green' }, label), copy), h('pre', { class: 'code is-fix', tabindex: '0', 'aria-label': `${label} code` }, fix[k])));
+      });
+      if (fix.note) wrap.append(h('p', { class: 'rule-desc' }, h('strong', { class: 'tone-green' }, 'How to fix: '), fix.note));
+    }
+  }
 
-function escapeHtml(str) {
-  if (!str) return '';
-  return String(str)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#039;');
-}
+  function extractDeclarations(css) {
+    const s = String(css || '');
+    const a = s.indexOf('{');
+    const b = s.lastIndexOf('}');
+    if (a !== -1 && b > a) return s.slice(a + 1, b).trim();
+    return s.trim();
+  }
+
+  function updatePreviewButton(btn) {
+    const active = state.previews.has(btn.dataset.previewKey);
+    clear(btn);
+    if (active) btn.append(h('span', { 'aria-hidden': 'true' }, '●'), 'Previewing · Revert');
+    else btn.append(h('span', { 'aria-hidden': 'true' }, '✦'), 'Preview Fix');
+    btn.classList.toggle('is-previewing', active);
+    btn.setAttribute('aria-label', active ? 'Previewing fix. Revert all previewed fixes' : 'Preview this CSS fix on the page');
+  }
+  function syncPreviewButtons() {
+    document.querySelectorAll('[data-preview-key]').forEach(updatePreviewButton);
+  }
+
+  async function togglePreview(key, selector, css) {
+    if (state.previews.has(key)) {
+      const res = await callPage('__auditforgeRevertAllFixes', [], { reinject: false });
+      state.previews.clear();
+      syncPreviewButtons();
+      toast(res.ok === false && !res.missing ? `Revert failed: ${res.error}` : 'All previewed fixes reverted.');
+      return;
+    }
+    const res = await callPage('__auditforgePreviewFix', [selector, extractDeclarations(css)]);
+    if (res.ok === false) { toast(`Preview failed: ${res.error || 'unknown error'}`); return; }
+    state.previews.add(key);
+    syncPreviewButtons();
+    toast('Fix previewed on the page. Choose Revert to undo.');
+  }
+
+  /* ------------------------------------------------------------------------
+     Drawer 2 — Mobile
+     ------------------------------------------------------------------------ */
+  function currentDevice() { return DEVICES.find((d) => d.id === state.deviceId) || DEVICES[0]; }
+  function deviceDims() {
+    const d = currentDevice();
+    return state.orientation === 'landscape' ? { width: d.height, height: d.width } : { width: d.width, height: d.height };
+  }
+
+  function initDeviceControls() {
+    const sel = $('device-select');
+    DEVICES.forEach((d) => sel.append(h('option', { value: d.id }, d.name)));
+    sel.value = state.deviceId;
+    sel.addEventListener('change', () => { state.deviceId = sel.value; renderMobile(); });
+    document.querySelectorAll('#orientation-group [data-orientation]').forEach((b) => {
+      b.addEventListener('click', () => {
+        state.orientation = b.dataset.orientation;
+        document.querySelectorAll('#orientation-group [data-orientation]').forEach((x) => x.setAttribute('aria-pressed', x === b ? 'true' : 'false'));
+        renderMobile();
+      });
+    });
+  }
+
+  function renderMobile() {
+    const r = state.result;
+    if (!r) return;
+    const body = clear($('mobile-body'));
+    const dev = currentDevice();
+    const dims = deviceDims();
+    const sim = state.mobileAnalysisByDevice[dev.id];
+    const simMeta = state.simMeta[dev.id];
+    const est = r.mobile.devices.find((d) => d.id === dev.id) || null;
+    const a = sim ? normalizeMobile(sim) : r.mobile;
+    const score = sim ? a.score : (est ? num(est.score, r.mobile.score) : r.mobile.score);
+    $('badge-mobile').textContent = `${r.mobile.score}/100`;
+
+    body.append(h('div', { class: 'device-head' },
+      h('span', { class: `device-score tone-${toneForScore(score)}`, 'aria-label': `Mobile health score ${score} out of 100` }, score),
+      h('div', { class: 'row-main' },
+        h('span', { class: 'device-name' }, dev.name),
+        h('span', { class: 'row-sub' }, `${dims.width} × ${dims.height} · ${state.orientation}`)),
+      sim
+        ? chip(`Device-accurate · ${simMeta ? simMeta.mode : 'simulated'}`, 'green')
+        : chip('Estimate', 'amber', 'Estimated from the desktop DOM')));
+
+    const vp = r.mobile.measuredViewport || {};
+    if (!sim) body.append(h('p', { class: 'note' }, `Measured at the desktop viewport (${num(vp.width)}×${num(vp.height)}). Launch the simulator for device-accurate results.`));
+    else if (simMeta && simMeta.mode === 'snapshot') body.append(h('p', { class: 'note' }, 'Simulator ran in snapshot mode (cross-origin frame).'));
+
+    const aa = a.touchTargets.failures.filter((f) => f.level === 'AA');
+    const adv = a.touchTargets.failures.filter((f) => f.level !== 'AA');
+    body.append(h('div', { class: 'stats stats-3' },
+      stat(a.overlaps.length, 'Overlaps', a.overlaps.length ? 'red' : 'green'),
+      stat(a.overflows.length, 'Overflows', a.overflows.length ? 'red' : 'green'),
+      stat(aa.length, 'Targets < 24px', aa.length ? 'red' : 'green'),
+      stat(adv.length, 'Targets < 44px', adv.length ? 'amber' : 'green'),
+      stat(a.touchTargets.crowding.length, 'Crowded', a.touchTargets.crowding.length ? 'amber' : 'green'),
+      stat(a.stickyOcclusions.length, 'Sticky > 30%', a.stickyOcclusions.length ? 'amber' : 'green')));
+
+    const vm = a.viewportMeta;
+    const vmOk = vm.present && vm.widthDeviceWidth && !vm.userScalableNo && !vm.maxScaleRestricted;
+    const meta = (title, wcag, impact) => ({ impact: impact || 'serious', ruleId: 'mobile-layout', title, wcag, message: title });
+    const rows = h('div', { class: 'section' });
+    rows.append(h('ul', { class: 'rows' }, row({
+      title: 'Viewport meta tag',
+      sub: [vm.content ? h('code', { class: 'sel', title: vm.content }, vm.content) : 'No <meta name="viewport"> tag', ...vm.issues],
+      actions: [chip(vmOk ? 'OK' : vm.present ? 'Issues' : 'Missing', vmOk ? 'green' : vm.present ? 'amber' : 'red')]
+    })));
+    if (!sim && est && arr(est.fixedWidthElements).length) {
+      rows.append(disclosure('m-fixed', 'Wider than this device', est.fixedWidthElements.length, listOrEmpty(est.fixedWidthElements, (s) => row({
+        sel: s, actions: [locateBtn(s, meta('Wider than device', ['1.4.10'], 'moderate'), s)] }), ''), 'amber'));
+    }
+    rows.append(
+      disclosure('m-overlap', 'Overlapping elements', a.overlaps.length, listOrEmpty(a.overlaps, (o) => row({
+        sel: o.selectorA, sub: [`overlaps ${o.selectorB} · ${num(o.area)}px²`], actions: [locateBtn(o.selectorA, meta('Overlapping element', ['1.4.10']), o.selectorA)] }), 'No overlaps detected.'), 'red'),
+      disclosure('m-overflow', 'Horizontal overflows', a.overflows.length, listOrEmpty(a.overflows, (o) => row({
+        sel: o.selector, sub: [`right edge ${num(o.right)}px · scroll ${num(o.scrollWidth)} / ${num(o.clientWidth)}`], actions: [locateBtn(o.selector, meta('Horizontal overflow', ['1.4.10']), o.selector)] }), 'No horizontal overflow.'), 'red'),
+      disclosure('m-targets', 'Small touch targets', a.touchTargets.failures.length, listOrEmpty(a.touchTargets.failures, (f) => row({
+        sel: f.selector,
+        sub: [h('span', { class: 'row-sub' }, `${num(f.width)} × ${num(f.height)}px · `, f.level === 'AA' ? h('span', { class: 'tone-red' }, 'Fails 2.5.8 (AA)') : h('span', { class: 'tone-amber' }, 'Below 44px (advisory)'))],
+        actions: [locateBtn(f.selector, { impact: f.level === 'AA' ? 'serious' : 'minor', ruleId: 'af-target-size', title: 'Small touch target', wcag: ['2.5.8'], message: `${f.width}×${f.height}px` }, f.selector)] }), 'All targets meet size guidance.'), 'red'),
+      disclosure('m-crowd', 'Crowded targets', a.touchTargets.crowding.length, listOrEmpty(a.touchTargets.crowding, (c) => row({
+        sel: c.selectorA, sub: [`${num(c.distance)}px from ${c.selectorB}`], actions: [locateBtn(c.selectorA, meta('Crowded target', ['2.5.8']), c.selectorA)] }), 'No crowding detected.'), 'amber'),
+      disclosure('m-sticky', 'Sticky / fixed occlusion', a.stickyOcclusions.length, listOrEmpty(a.stickyOcclusions, (s) => row({
+        sel: s.selector, sub: [`${num(s.heightPct)}% of screen height`], actions: [locateBtn(s.selector, meta('Sticky element occludes content', ['2.4.11']), s.selector)] }), 'No large sticky elements.'), 'amber'));
+    body.append(rows);
+
+    const others = Object.keys(state.mobileAnalysisByDevice).filter((id) => id !== dev.id);
+    if (others.length) body.append(h('p', { class: 'note' }, `Also simulated: ${others.map((id) => (DEVICES.find((d) => d.id === id) || { name: id }).name).join(', ')}. Included in the PDF report.`));
+    syncToggleButtons();
+  }
+
+  async function launchSimulator() {
+    const btn = $('mobile-launch');
+    btn.disabled = true;
+    const deviceId = state.deviceId;
+    const orientation = state.orientation;
+    announce('Launching mobile simulator…');
+    const res = await callPage('__auditforgeStartMobileSimulator', [{ deviceId, orientation }]);
+    btn.disabled = false;
+    if (res.ok === false) { toast(`Simulator failed: ${res.error || 'unknown error'}`); return; }
+    state.mobileSimActive = true;
+    state.simMeta[deviceId] = { mode: res.mode || 'live', orientation };
+    if (res.analysis && typeof res.analysis === 'object') {
+      state.mobileAnalysisByDevice[deviceId] = res.analysis;
+      toast(`Simulator running (${res.mode || 'live'}). Device-accurate results loaded.`);
+    } else {
+      toast(`Simulator running (${res.mode || 'live'}). Device-accurate analysis is not available for this page.`);
+    }
+    renderMobile();
+  }
+
+  async function closeSimulator() {
+    await callPage('__auditforgeStopMobileSimulator', [], { reinject: false });
+    state.mobileSimActive = false;
+    syncToggleButtons();
+    toast('Simulator closed.');
+  }
+
+  async function openDeviceWindow() {
+    const url = (state.result && state.result.meta.url) || state.tabUrl;
+    const d = deviceDims();
+    const res = await sendMessage({ type: 'OPEN_DEVICE_WINDOW', url, width: d.width, height: d.height });
+    if (res.ok) { state.deviceWindowId = res.windowId != null ? res.windowId : null; toast(`Opened a ${d.width}×${d.height} device window.`); }
+    else toast(`Could not open window: ${res.error || 'unknown error'}`);
+  }
+
+  async function resizeWindow() {
+    const d = deviceDims();
+    const res = await sendMessage({ type: 'RESIZE_WINDOW_TO_DEVICE', width: d.width, height: d.height });
+    toast(res.ok ? `Window resized to ${d.width}×${d.height}.` : `Could not resize window: ${res.error || 'unknown error'}`);
+  }
+
+  /* ------------------------------------------------------------------------
+     Drawer 3 — Screen reader
+     ------------------------------------------------------------------------ */
+  function srSequence() {
+    return state.live.sequence || (state.result ? state.result.screenReader.sequence : []);
+  }
+  function srBarrierCount() {
+    if (state.live.sequence) return num(state.live.barrierCount, state.live.sequence.filter((s) => s.isBarrier).length);
+    return state.result ? state.result.screenReader.barrierCount : 0;
+  }
+  const isSkipped = (item) => state.skipHidden && item.visibility === 'hidden-visual';
+
+  function initPersonas() {
+    const g = $('persona-group');
+    PERSONAS.forEach((p) => g.append(h('button', {
+      type: 'button', class: 'seg-card', dataset: { persona: p.id }, 'aria-pressed': p.id === state.persona ? 'true' : 'false',
+      onclick: () => setPersona(p.id)
+    }, h('strong', null, p.name), h('span', null, p.syntax))));
+  }
+
+  async function setPersona(id) {
+    if (id === state.persona) return;
+    state.persona = id;
+    document.querySelectorAll('#persona-group [data-persona]').forEach((b) => b.setAttribute('aria-pressed', b.dataset.persona === id ? 'true' : 'false'));
+    stopSpeech();
+    preserveUi(renderTimeline);
+    const p = PERSONAS.find((x) => x.id === id);
+    announce(`${p.name} selected.`);
+    if (state.hudActive && state.result) await startHud();
+  }
+
+  const CAT_LABEL = { headings: 'Heading hierarchy', landmarks: 'Landmark coverage', labeling: 'Control labelling', focus: 'Focus & tab flow', images: 'Image alternatives' };
+  const CAT_WEIGHT = { headings: 25, landmarks: 20, labeling: 30, focus: 15, images: 10 };
+
+  function renderScreenReader() {
+    const sr = state.result.screenReader;
+    const box = clear($('sr-score'));
+    const ring = h('div', { class: 'mini-ring' });
+    ring.append(scoreRing(sr.score, 'Screen reader score', 80, 8));
+    box.append(sectionH('Compatibility'),
+      h('div', { class: 'sr-scorebox' }, ring,
+        h('div', { class: 'row-chips' },
+          chip(`Headings: ${sr.headingStatus || 'Unknown'}`, sr.headingStatus === 'Sequential' ? 'green' : 'amber'),
+          chip(`Landmarks: ${sr.landmarkStatus || 'Unknown'}`, sr.landmarkStatus === 'Verified' ? 'green' : 'amber'),
+          h('span', { id: 'sr-barriers' }))),
+      h('ul', { class: 'cats' }, Object.keys(CAT_LABEL).filter((k) => sr.categories[k]).map((k) => {
+        const c = sr.categories[k];
+        const sc = num(c.score);
+        return h('li', null,
+          h('div', { class: 'cat-top' }, h('span', null, CAT_LABEL[k]), h('span', { class: 'num' }, `${sc} · ${num(c.weight, CAT_WEIGHT[k])}%`)),
+          h('div', { class: `bar tone-${toneForScore(sc)}`, 'aria-hidden': 'true' }, h('span', { style: { width: `${Math.max(0, Math.min(100, sc))}%` } })),
+          c.detail ? h('div', { class: 'cat-detail' }, c.detail) : null);
+      })));
+    updateBarrierChip();
+
+    renderTimeline();
+
+    const st = clear($('sr-structure'));
+    st.append(h('div', { class: 'section' }, sectionH('Heading tree'),
+      sr.headings.length ? h('ul', { class: 'rows htree' }, sr.headings.map((hd) => row({
+        lead: h('span', { class: 'hlvl', style: { marginLeft: `${(Math.max(1, num(hd.level, 1)) - 1) * 12}px` } }, `H${hd.level}`),
+        title: hd.text || '(empty heading)', sub: hd.issue ? [h('span', { class: 'row-sub tone-amber' }, hd.issue)] : null,
+        actions: [locateBtn(hd.selector, { impact: hd.issue ? 'moderate' : 'minor', ruleId: 'heading-order', title: `Heading level ${hd.level}`, wcag: ['1.3.1'], message: hd.issue || hd.text }, `heading ${hd.text || hd.selector}`)]
+      }))) : h('p', { class: 'note' }, 'No headings found.')));
+
+    const lm = sr.landmarks;
+    st.append(h('div', { class: 'section' }, sectionH('Landmarks'),
+      h('div', { class: 'lm-grid' }, ['banner', 'main', 'navigation', 'contentinfo'].map((k) => chip(`${lm[k] ? '✓' : '✕'} ${k}`, lm[k] ? 'green' : 'red', lm[k] ? 'Present' : 'Missing'))),
+      lm.list.length ? h('ul', { class: 'rows' }, lm.list.map((l) => row({
+        title: l.label ? `${l.role} · ${l.label}` : l.role, sel: l.selector,
+        actions: [locateBtn(l.selector, { impact: 'minor', ruleId: 'landmark', title: `${l.role} landmark`, wcag: ['1.3.1'], message: l.label || l.role }, `${l.role} landmark`)]
+      }))) : null));
+
+    st.append(h('div', { class: 'section' }, sectionH(`Silent controls (${sr.silentControls.length})`),
+      listOrEmpty(sr.silentControls, (c) => row({
+        title: c.role || 'control', sel: c.selector,
+        actions: [locateBtn(c.selector, { impact: 'critical', ruleId: 'silent-control', title: 'Control has no accessible name', wcag: ['4.1.2'], message: c.html }, c.selector)]
+      }), 'Every interactive control has an accessible name.')));
+  }
+
+  function updateBarrierChip() {
+    const el = $('sr-barriers');
+    if (!el) return;
+    const n = srBarrierCount();
+    clear(el).append(chip(plural(n, 'barrier'), n ? 'red' : 'green'));
+  }
+
+  function announcementFor(item, persona) {
+    const a = item.announcements || {};
+    if (a[persona]) return a[persona];
+    return [item.name, item.role, item.state, item.hint].filter(Boolean).join(', ') || item.role || 'unlabelled';
+  }
+  const itemKey = (item, i) => `sr|${item.index != null ? item.index : i}|${item.selector}`;
+
+  function renderTimeline() {
+    const ol = clear($('sr-timeline'));
+    if (!state.result) return;
+    const seq = srSequence();
+    if (!seq.length) { ol.append(h('li', { class: 'empty' }, 'No reading sequence was recorded.')); return; }
+    const pname = PERSONAS.find((p) => p.id === state.persona).name;
+    ol.setAttribute('aria-label', `${pname} announcements`);
+    seq.forEach((item, i) => {
+      const text = announcementFor(item, state.persona);
+      const k = itemKey(item, i);
+      const skipped = isSkipped(item);
+      const cat = item.category === 'heading' && item.headingLevel ? `heading ${item.headingLevel}` : item.category;
+      ol.append(row({
+        cls: `${skipped ? 'is-skipped' : ''}`,
+        data: { k },
+        lead: h('span', { class: `idx${item.isBarrier ? ' is-warn' : ''}` }, i + 1),
+        title: null,
+        extra: null,
+        sub: [h('span', { class: 'sr-cat' }, cat), h('span', { class: 'sr-say' }, `“${text}”`),
+          item.isBarrier && item.barrierReason ? h('span', { class: 'row-sub tone-red' }, item.barrierReason) : null,
+          skipped ? h('span', { class: 'row-sub' }, 'Skipped by Read All') : null],
+        chips: [item.isBarrier ? chip('Barrier', 'red') : null, visChip(item)],
+        actions: [
+          h('button', { type: 'button', class: 'btn btn-sm btn-icon', 'aria-label': `Listen to item ${i + 1}`, title: 'Listen', dataset: { key: `listen|${k}` }, onclick: () => listenItem(item) }, h('span', { 'aria-hidden': 'true' }, '▶')),
+          locateBtn(item.selector, { impact: item.isBarrier ? 'serious' : 'minor', ruleId: 'sr-sequence', title: text, wcag: item.isBarrier ? ['4.1.2'] : [], message: item.barrierReason || text }, `item ${i + 1}`, `loc|${k}`)
+        ]
+      }));
+    });
+    if (speech.current) markSpeaking(speech.current);
+  }
+
+  async function startHud() {
+    return callPage('__auditforgeStartVoiceOverSimulator', [state.persona, srSequence(), { includeHiddenVisual: !state.skipHidden }]);
+  }
+
+  async function toggleHud() {
+    if (!state.result) return;
+    if (state.hudActive) {
+      await callPage('__auditforgeStopVoiceOverSimulator', [], { reinject: false });
+      state.hudActive = false;
+      syncToggleButtons();
+      toast('On-page HUD stopped.');
+      return;
+    }
+    stopSpeech();
+    const res = await startHud();
+    if (res.ok === false) { toast(`HUD failed: ${res.error || 'unknown error'}`); return; }
+    state.hudActive = true;
+    syncToggleButtons();
+    toast('On-page HUD launched. Use the arrow keys on the page to move.');
+  }
+
+  async function setSkipHidden(skip) {
+    state.skipHidden = skip;
+    preserveUi(renderTimeline);
+    announce(skip ? 'Content hidden from view will be skipped.' : 'Content hidden from view will be read.');
+    if (state.hudActive) await startHud();
+  }
+
+  /* ---------- Earcons (Web Audio, spec §5.3 tone profiles) ---------- */
+  let audioCtx = null;
+  function getAudioCtx() {
+    try {
+      if (!audioCtx) {
+        const AC = window.AudioContext || window.webkitAudioContext;
+        if (!AC) return null;
+        audioCtx = new AC();
+      }
+      if (audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
+      return audioCtx;
+    } catch (e) { return null; }
+  }
+
+  /** Must first be called from a click handler (audio policy, spec §9.3). Returns duration in ms. */
+  function playEarcon(persona) {
+    const ctx = getAudioCtx();
+    if (!ctx) return 0;
+    const now = ctx.currentTime + 0.01;
+    const tone = (type, f0, f1, start, dur, vol) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = type;
+      osc.frequency.setValueAtTime(f0, now + start);
+      if (f1 && f1 !== f0) osc.frequency.exponentialRampToValueAtTime(f1, now + start + dur);
+      gain.gain.setValueAtTime(0.0001, now + start);
+      gain.gain.linearRampToValueAtTime(vol, now + start + 0.006);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + start + dur);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(now + start);
+      osc.stop(now + start + dur + 0.02);
+    };
+    try {
+      switch (persona) {
+        case 'voiceover': // harmonic crystalline dual-sine bell chime (E5 & C6)
+          tone('sine', 659.25, 0, 0, 0.32, 0.05);
+          tone('sine', 1046.5, 0, 0.05, 0.36, 0.035);
+          return 420;
+        case 'talkback': { // resonant fluid bubble bloop 460Hz → 280Hz
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          osc.type = 'sine';
+          osc.frequency.setValueAtTime(460, now);
+          osc.frequency.exponentialRampToValueAtTime(280, now + 0.09);
+          gain.gain.setValueAtTime(0.06, now);
+          gain.gain.linearRampToValueAtTime(0.001, now + 0.09);
+          osc.connect(gain);
+          gain.connect(ctx.destination);
+          osc.start(now);
+          osc.stop(now + 0.09);
+          return 120;
+        }
+        case 'nvda': // crisp square-wave chirp 440Hz → 660Hz
+          tone('square', 440, 660, 0, 0.07, 0.022);
+          return 100;
+        case 'narrator': // fluent two-tone soft sine chord (D5 & A5)
+          tone('sine', 587.33, 0, 0, 0.28, 0.04);
+          tone('sine', 880, 0, 0, 0.28, 0.03);
+          return 320;
+        default:
+          return 0;
+      }
+    } catch (e) { return 0; }
+  }
+
+  /* ---------- Speech (Web Speech, falling back to chrome.tts) ---------- */
+  const speech = { token: 0, useTts: !('speechSynthesis' in window), voices: [], speaking: false, current: null };
+
+  function speechRate() { return parseFloat($('sr-rate').value) || 1; }
+
+  function loadVoices() {
+    const sel = $('sr-voice');
+    const prev = sel.value;
+    const fill = (voices) => {
+      clear(sel);
+      sel.append(h('option', { value: '' }, 'Default voice'));
+      voices.forEach((v) => sel.append(h('option', { value: v.value }, v.label)));
+      if ([...sel.options].some((o) => o.value === prev)) sel.value = prev;
+    };
+    if (!speech.useTts && window.speechSynthesis) {
+      const vs = window.speechSynthesis.getVoices() || [];
+      speech.voices = vs;
+      if (vs.length) { fill(vs.map((v) => ({ value: v.voiceURI, label: `${v.name} (${v.lang})` }))); return; }
+    }
+    try {
+      if (hasChrome && chrome.tts && chrome.tts.getVoices) {
+        chrome.tts.getVoices((vs) => {
+          if (!speech.useTts && speech.voices.length) return;
+          fill((vs || []).filter((v) => v.voiceName).map((v) => ({ value: `tts:${v.voiceName}`, label: `${v.voiceName}${v.lang ? ` (${v.lang})` : ''}` })));
+        });
+      }
+    } catch (e) { /* no voices */ }
+  }
+
+  function speakTts(text, token) {
+    return new Promise((resolve) => {
+      if (!hasChrome || !chrome.tts) return resolve();
+      const v = $('sr-voice').value;
+      const opts = { rate: speechRate(), enqueue: false };
+      if (v.startsWith('tts:')) opts.voiceName = v.slice(4);
+      let done = false;
+      const finish = () => { if (!done) { done = true; clearTimeout(t); resolve(); } };
+      const t = setTimeout(finish, 3000 + text.length * 110 / speechRate());
+      opts.onEvent = (e) => { if (['end', 'interrupted', 'cancelled', 'error'].includes(e.type)) finish(); };
+      try { chrome.tts.speak(text, opts, () => { if (chrome.runtime && chrome.runtime.lastError) finish(); }); } catch (e) { finish(); }
+      if (token !== speech.token) finish();
+    });
+  }
+
+  function speak(text, token) {
+    if (speech.useTts || !window.speechSynthesis) return speakTts(text, token);
+    return new Promise((resolve) => {
+      const u = new SpeechSynthesisUtterance(text);
+      u.rate = speechRate();
+      const vv = $('sr-voice').value;
+      const voice = speech.voices.find((v) => v.voiceURI === vv);
+      if (voice) { u.voice = voice; u.lang = voice.lang; }
+      let done = false;
+      const finish = () => { if (!done) { done = true; clearTimeout(t); resolve(); } };
+      const t = setTimeout(finish, 2500 + text.length * 100 / speechRate());
+      u.onend = finish;
+      u.onerror = (e) => {
+        if (e.error === 'interrupted' || e.error === 'canceled') return finish();
+        // Web Speech unavailable/blocked: fall back to chrome.tts for this and later items.
+        if (hasChrome && chrome.tts) {
+          speech.useTts = true;
+          clearTimeout(t);
+          done = true;
+          speakTts(text, token).then(resolve);
+        } else finish();
+      };
+      try { window.speechSynthesis.speak(u); } catch (e) { finish(); }
+    });
+  }
+
+  function markSpeaking(item) {
+    speech.current = item;
+    const list = $('sr-timeline');
+    const target = item ? `|${item.index}|${item.selector}` : null;
+    list.querySelectorAll('.row').forEach((li) => {
+      const on = !!target && (li.dataset.k || '').endsWith(target);
+      li.classList.toggle('is-speaking', on);
+      if (on) { li.setAttribute('aria-current', 'true'); scrollWithin(list, li); } else li.removeAttribute('aria-current');
+    });
+  }
+
+  function setSpeaking(on) {
+    speech.speaking = on;
+    $('sr-stop').disabled = !on;
+  }
+
+  function stopSpeech() {
+    speech.token += 1;
+    try { if (window.speechSynthesis) window.speechSynthesis.cancel(); } catch (e) { /* ignore */ }
+    try { if (hasChrome && chrome.tts && chrome.tts.stop) chrome.tts.stop(); } catch (e) { /* ignore */ }
+    if ($('sr-stop')) setSpeaking(false);
+    if ($('sr-timeline')) markSpeaking(null);
+  }
+
+  async function speakItem(item, token) {
+    markSpeaking(item);
+    if ($('sr-earcons').checked) {
+      const ms = playEarcon(state.persona);
+      if (ms) await sleep(Math.min(ms, 250));
+    }
+    if (token !== speech.token) return;
+    await speak(announcementFor(item, state.persona), token);
+  }
+
+  async function listenItem(item) {
+    stopSpeech();
+    getAudioCtx(); // unlock audio inside the click gesture
+    const token = speech.token;
+    setSpeaking(true);
+    await speakItem(item, token);
+    if (token === speech.token) { setSpeaking(false); markSpeaking(null); }
+  }
+
+  async function readAll() {
+    if (!state.result) return;
+    stopSpeech();
+    getAudioCtx();
+    const token = speech.token;
+    setSpeaking(true);
+    // Snapshot: live updates during reading don't disturb the current pass.
+    const seq = srSequence().filter((item) => !isSkipped(item));
+    announce(`Reading ${plural(seq.length, 'item')}${state.skipHidden ? ', skipping content hidden from view' : ''}.`);
+    for (const item of seq) {
+      if (token !== speech.token) return;
+      await speakItem(item, token);
+      if (token !== speech.token) return;
+      await sleep(220);
+    }
+    if (token === speech.token) { setSpeaking(false); markSpeaking(null); announce('Finished reading.'); }
+  }
+
+  /* ------------------------------------------------------------------------
+     Drawer 4 — Tab order
+     ------------------------------------------------------------------------ */
+  function tabOrderView() {
+    return state.live.tabOrder || (state.result ? state.result.tabOrder : null);
+  }
+  const tabKey = (s, i) => `tab|${s.index != null ? s.index : i}|${s.selector}`;
+
+  function renderTabOrder() {
+    const t = tabOrderView();
+    if (!t) return;
+    $('badge-tab').textContent = plural(t.total, 'stop');
+    const body = clear($('tab-body'));
+    const statusTone = { Sequential: 'green', 'Needs Review': 'amber', Disrupted: 'red' }[t.status] || 'muted';
+    const sl = t.skipLink;
+    const hiddenCount = t.sequence.filter((s) => s.visibility === 'hidden-visual').length;
+    body.append(h('div', { class: 'row-chips' }, chip(`Focus flow: ${t.status}`, statusTone)), h('div', { class: 'stats' },
+      stat(t.total, 'Tab stops', 'cyan'),
+      stat(t.anomalies.length, 'Anomalies', t.anomalies.length ? 'red' : 'green'),
+      stat(t.positiveTabindexCount, 'tabindex > 0', t.positiveTabindexCount ? 'amber' : 'green'),
+      stat(hiddenCount, 'Hidden stops', hiddenCount ? 'amber' : 'green')));
+
+    body.append(h('ul', { class: 'rows' }, row({
+      title: 'Skip-to-content link',
+      sub: [`Present ${sl.present ? 'yes' : 'no'} · Works ${sl.functional ? 'yes' : 'no'} · Visible on focus ${sl.visibleOnFocus ? 'yes' : 'no'}`],
+      actions: [sl.present && sl.selector
+        ? locateBtn(sl.selector, { impact: 'minor', ruleId: 'skip-link', title: 'Skip link', wcag: ['2.4.1'], message: '' }, 'skip link')
+        : chip('Missing', 'red')]
+    })));
+
+    if (t.anomalies.length) {
+      body.append(h('div', { class: 'section' }, sectionH(`Flow anomalies (${t.anomalies.length})`),
+        h('ul', { class: 'rows' }, t.anomalies.map((a) => row({
+          title: [chip('Anomaly', 'amber'), ' ', a.type.replace(/-/g, ' ').replace(/^./, (c) => c.toUpperCase())],
+          sub: [`${a.fromIndex >= 0 ? `#${a.fromIndex + 1} → ` : ''}#${a.toIndex + 1} · ${a.message}`]
+        })))));
+    }
+
+    const live = state.live.tabAt;
+    const focusNote = h('span', { class: 'meta-line', id: 'tab-focus-note' }, '');
+    const sec = h('div', { class: 'section' }, sectionH('Focus sequence', focusNote));
+    if (live) sec.append(h('p', { class: 'note' }, `Live from the page · updated ${live.toLocaleTimeString()}`));
+    if (!t.sequence.length) sec.append(h('p', { class: 'note' }, 'No focusable elements found.'));
+    else {
+      sec.append(h('ol', { class: 'rows scroll-list', id: 'tab-seq', 'aria-label': 'Tab stops in focus order' }, t.sequence.map((s, i) => row({
+        data: { k: tabKey(s, i), sel: s.selector, i: String(i) },
+        lead: h('span', { class: `idx${s.isAnomaly ? ' is-warn' : ''}`, 'aria-hidden': 'true' }, i + 1),
+        title: s.name || h('span', { class: 'tone-red' }, '(no accessible name)'),
+        sub: [[s.role, s.tabindex != null ? `tabindex=${s.tabindex}` : null].filter((x) => x != null).join(' · '),
+          s.warning ? h('span', { class: 'row-sub tone-amber' }, s.warning) : null],
+        chips: [visChip(s)],
+        actions: [locateBtn(s.selector, { impact: s.isAnomaly ? 'serious' : 'minor', ruleId: 'tab-order', title: `Tab stop #${i + 1}`, wcag: ['2.4.3'], message: s.warning || `${s.role} ${s.name}` }, `tab stop ${i + 1}`, `loc|${tabKey(s, i)}`)]
+      }))));
+    }
+    body.append(sec);
+    applyTabFocus(false);
+  }
+
+  /** Highlights the stop the page reported as focused (AF_TAB_FOCUS_CHANGED). */
+  function applyTabFocus(scroll) {
+    const list = $('tab-seq');
+    const note = $('tab-focus-note');
+    const f = state.focusedTab;
+    if (!list) return;
+    const rows = [...list.querySelectorAll('.row')];
+    let hit = null;
+    if (f) {
+      hit = rows.find((r) => r.dataset.sel === f.selector && (f.index == null || r.dataset.i === String(f.index)))
+        || rows.find((r) => r.dataset.sel === f.selector)
+        || (f.index != null ? rows[f.index] : null);
+    }
+    rows.forEach((r) => {
+      const on = r === hit;
+      r.classList.toggle('is-focused', on);
+      if (on) r.setAttribute('aria-current', 'true'); else r.removeAttribute('aria-current');
+    });
+    if (note) note.textContent = hit ? `Focused: #${Number(hit.dataset.i) + 1} of ${rows.length}` : '';
+    if (hit && scroll) scrollWithin(list, hit);
+  }
+
+  async function toggleTabTrail() {
+    if (!state.result) return;
+    if (state.tabTrail) {
+      await callPage('__auditforgeHideTabTrail', [], { reinject: false });
+      state.tabTrail = false;
+      state.focusedTab = null;
+      $('live-tab').hidden = true;
+      syncToggleButtons();
+      applyTabFocus(false);
+      toast('Tab-Trail hidden.');
+      return;
+    }
+    const res = await callPage('__auditforgeShowTabTrail', [tabOrderView().sequence, { lineStyle: state.lineStyle, live: true }]);
+    if (res.ok === false) { toast(`Tab-Trail failed: ${res.error || 'unknown error'}`); return; }
+    state.tabTrail = true;
+    syncToggleButtons();
+    toast(`Tab-Trail shown${typeof res.drawn === 'number' ? ` (${res.drawn} stops drawn)` : ''}.`);
+  }
+
+  async function setLineStyle(style) {
+    state.lineStyle = style;
+    document.querySelectorAll('#line-style-group [data-line-style]').forEach((b) => b.setAttribute('aria-pressed', b.dataset.lineStyle === style ? 'true' : 'false'));
+    if (state.tabTrail) {
+      let res = await callPage('__auditforgeSetTabTrailLineStyle', [style], { reinject: false });
+      // Older overlay builds: redraw the trail with the new style instead.
+      if (res.missing) res = await callPage('__auditforgeShowTabTrail', [tabOrderView().sequence, { lineStyle: style, live: true }]);
+      if (res.ok === false) { toast(`Could not change line style: ${res.error || 'unknown error'}`); return; }
+    }
+    announce(`${style === 'curved' ? 'Curved' : 'Straight'} Tab-Trail lines.`);
+  }
+
+  /* ------------------------------------------------------------------------
+     Live updates from the page (CONTRACT §10.3 / §10.4)
+     ------------------------------------------------------------------------ */
+  function normalizeTabOrder(t) {
+    t = Object.assign({}, t || {});
+    t.sequence = arr(t.sequence);
+    t.anomalies = arr(t.anomalies);
+    t.total = num(t.total, t.sequence.length);
+    t.positiveTabindexCount = num(t.positiveTabindexCount);
+    t.skipLink = t.skipLink || { present: false, functional: false, visibleOnFocus: false, selector: null };
+    t.status = t.status || 'Needs Review';
+    return t;
+  }
+
+  function showLive(which, at) {
+    const pill = $(`live-${which}`);
+    pill.hidden = false;
+    pill.title = `Updated live from the page at ${at.toLocaleTimeString()}`;
+  }
+
+  function onTabOrderUpdated(tabOrder) {
+    if (!state.result || !tabOrder) return;
+    state.live.tabOrder = normalizeTabOrder(tabOrder);
+    state.live.tabAt = new Date();
+    showLive('tab', state.live.tabAt);
+    preserveUi(renderTabOrder);
+  }
+
+  function onSrSequenceUpdated(sequence, barrierCount) {
+    if (!state.result || !Array.isArray(sequence)) return;
+    state.live.sequence = sequence;
+    state.live.barrierCount = barrierCount;
+    state.live.srAt = new Date();
+    showLive('sr', state.live.srAt);
+    $('sr-live-note').textContent = `Live · updated ${state.live.srAt.toLocaleTimeString()}`;
+    preserveUi(() => { renderTimeline(); updateBarrierChip(); });
+  }
+
+  function onTabFocusChanged(index, selector) {
+    if (!state.result) return;
+    state.focusedTab = { index: typeof index === 'number' ? index : null, selector: selector || null };
+    applyTabFocus(true);
+  }
+
+  function resetLive() {
+    state.live = { tabOrder: null, sequence: null, barrierCount: 0, tabAt: null, srAt: null };
+    state.focusedTab = null;
+    ['live-tab', 'live-sr'].forEach((id) => { const el = $(id); if (el) el.hidden = true; });
+    const n = $('sr-live-note');
+    if (n) n.textContent = '';
+  }
+
+  /* ------------------------------------------------------------------------
+     Drawer 5 — Vision
+     ------------------------------------------------------------------------ */
+  function renderVision() {
+    const body = clear($('vision-body'));
+    LENS_GROUPS.forEach((g) => {
+      body.append(h('div', { class: 'section' }, sectionH(g.title),
+        h('div', { class: 'lens-grid', role: 'group', 'aria-label': g.title }, g.lenses.map((l) => h('button', {
+          type: 'button', class: 'lens', dataset: { lens: l.id }, 'aria-pressed': state.lens === l.id ? 'true' : 'false',
+          onclick: () => applyLens(state.lens === l.id ? 'none' : l.id)
+        }, h('strong', null, l.label), h('span', null, l.desc))))));
+    });
+    syncToggleButtons();
+  }
+
+  async function applyLens(id) {
+    const res = id === 'none'
+      ? await callPage('__auditforgeResetVision', [], { reinject: false })
+      : await callPage('__auditforgeApplyVisionFilter', [id]);
+    if (res.ok === false && !(id === 'none' && res.missing)) { toast(`Lens failed: ${res.error || 'unknown error'}`); return; }
+    state.lens = id;
+    syncToggleButtons();
+    toast(id === 'none' ? 'Vision reset to normal.' : `${LENS_LABEL[id]} lens applied.`);
+  }
+
+  /* ------------------------------------------------------------------------
+     Drawer 6 — Links
+     ------------------------------------------------------------------------ */
+  const SECURITY_TYPES = ['missing-noopener', 'javascript-void'];
+  const STATUS_TONE = { ok: 'green', warning: 'amber', error: 'red' };
+  const STATUS_LABEL = { ok: 'OK', warning: 'Warning', error: 'Error' };
+
+  function renderLinks() {
+    const l = state.result.links;
+    const body = clear($('links-body'));
+    body.append(h('div', { class: 'stats' },
+      stat(l.total, 'Links', 'cyan'), stat(l.internal, 'Internal', 'muted'), stat(l.external, 'External', 'muted'), stat(l.anchors, 'Anchors', 'muted')),
+      h('div', { class: 'stats stats-tight' }, stat(l.counts.ok, 'OK', 'green'), stat(l.counts.warning, 'Warnings', 'amber'), stat(l.counts.error, 'Errors', 'red')));
+
+    const protos = {};
+    l.list.forEach((x) => { const p = x.protocol || '(none)'; protos[p] = (protos[p] || 0) + 1; });
+    const entries = Object.entries(protos).sort((a, b) => b[1] - a[1]);
+    const max = Math.max(1, ...entries.map((e) => e[1]));
+    body.append(h('div', { class: 'section' }, sectionH('Protocols'),
+      entries.length ? h('div', null, entries.map(([p, n]) => h('div', { class: 'proto' },
+        h('span', { class: 'proto-name' }, p), h('div', { class: 'bar', 'aria-hidden': 'true' }, h('span', { style: { width: `${(n / max) * 100}%` } })), h('span', { class: 'num' }, n))))
+        : h('p', { class: 'note' }, 'No links found.')));
+
+    const issueRow = (x) => row({
+      title: [chip(IMPACT_LABEL[x.severity] || x.severity, SEV_TONE[x.severity] || 'muted'), ' ', x.text || '(no text)'], sel: x.href || '(empty href)', sub: [x.message],
+      actions: [locateBtn(x.selector, { impact: x.severity, ruleId: `af-link-${x.type}`, title: x.message, wcag: x.type === 'generic-text' || x.type === 'no-text' ? ['2.4.4'] : [], message: x.href }, x.text || x.selector)]
+    });
+    const sec = l.issues.filter((x) => SECURITY_TYPES.includes(x.type));
+    const other = l.issues.filter((x) => !SECURITY_TYPES.includes(x.type));
+    body.append(h('div', { class: 'section' }, sectionH(`Security issues (${sec.length})`), listOrEmpty(sec, issueRow, 'No link security issues.')));
+    body.append(h('div', { class: 'section' }, sectionH(`Integrity issues (${other.length})`), listOrEmpty(other, issueRow, 'No broken or empty links.')));
+
+    const filters = h('div', { class: 'seg', role: 'group', 'aria-label': 'Filter links by status' });
+    [['all', 'All', l.list.length], ['ok', 'OK', l.list.filter((x) => x.status === 'ok').length], ['warning', 'Warnings', l.list.filter((x) => x.status === 'warning').length], ['error', 'Errors', l.list.filter((x) => x.status === 'error').length]]
+      .forEach(([k, label, n]) => filters.append(h('button', {
+        type: 'button', class: 'seg-btn', dataset: { linkFilter: k }, 'aria-pressed': state.linkFilter === k ? 'true' : 'false',
+        onclick: () => {
+          state.linkFilter = k;
+          filters.querySelectorAll('[data-link-filter]').forEach((b) => b.setAttribute('aria-pressed', b.dataset.linkFilter === k ? 'true' : 'false'));
+          renderLinkList();
+        }
+      }, label, h('span', { class: 'n' }, n))));
+    body.append(h('div', { class: 'section' }, sectionH('All links'), filters, h('ul', { class: 'rows scroll-list', id: 'links-list', 'aria-label': 'Links' })));
+    renderLinkList();
+  }
+
+  function renderLinkList() {
+    const ul = clear($('links-list'));
+    const items = state.result.links.list.filter((x) => state.linkFilter === 'all' || x.status === state.linkFilter);
+    if (!items.length) { ul.append(h('li', { class: 'empty' }, 'No links match this filter.')); return; }
+    items.forEach((x) => ul.append(row({
+      lead: h('span', { class: `dot tone-${STATUS_TONE[x.status] || 'muted'}`, title: STATUS_LABEL[x.status] || x.status }, h('span', { class: 'sr-only' }, STATUS_LABEL[x.status] || x.status)),
+      title: x.text || '(no text)', sel: x.href || '(empty href)',
+      sub: [x.issueTypes && x.issueTypes.length ? h('span', { class: 'row-sub tone-amber' }, x.issueTypes.join(', ').replace(/-/g, ' ')) : null],
+      chips: [x.isExternal ? chip('External', 'magenta') : null, x.target === '_blank' ? chip('New tab', 'muted') : null],
+      actions: [locateBtn(x.selector, { impact: x.status === 'error' ? 'serious' : x.status === 'warning' ? 'moderate' : 'minor', ruleId: 'link', title: x.text || 'Link', wcag: [], message: x.href }, `link ${x.text || x.href || x.selector}`)]
+    })));
+  }
+
+  /* ------------------------------------------------------------------------
+     Toggle button sync (also used by AF_OVERLAY_CLOSED)
+     ------------------------------------------------------------------------ */
+  function syncToggleButtons() {
+    const tt = $('tab-trail');
+    tt.textContent = state.tabTrail ? 'Hide Tab-Trail' : 'Show Tab-Trail';
+    tt.classList.toggle('is-active', state.tabTrail);
+    const hud = $('sr-hud');
+    hud.textContent = state.hudActive ? 'Stop On-Page HUD' : 'Launch On-Page HUD';
+    hud.classList.toggle('is-active', state.hudActive);
+    $('mobile-close').hidden = !state.mobileSimActive;
+    const ml = $('mobile-launch');
+    clear(ml).append(h('span', { 'aria-hidden': 'true' }, '📱'), state.mobileSimActive ? ' Relaunch Simulator' : ' Launch Simulator');
+    ml.classList.toggle('is-active', state.mobileSimActive);
+    document.querySelectorAll('[data-lens]').forEach((b) => b.setAttribute('aria-pressed', b.dataset.lens === state.lens ? 'true' : 'false'));
+    $('vision-status').textContent = state.lens === 'none' ? 'No lens active.' : `Active lens: ${LENS_LABEL[state.lens] || state.lens}`;
+    syncPreviewButtons();
+  }
+
+  function onOverlayClosed(overlay) {
+    switch (overlay) {
+      case 'tabTrail': state.tabTrail = false; state.focusedTab = null; $('live-tab').hidden = true; applyTabFocus(false); break;
+      case 'vision': state.lens = 'none'; break;
+      case 'voiceover': state.hudActive = false; $('live-sr').hidden = true; break;
+      case 'mobile': state.mobileSimActive = false; break;
+      case 'fixPreview': state.previews.clear(); break;
+      case 'highlight': default: break;
+    }
+    syncToggleButtons();
+  }
+
+  function onRuntimeMessage(msg, sender) {
+    if (!msg || typeof msg.type !== 'string') return;
+    // Only accept page events from the audited tab.
+    if (sender && sender.tab && state.tabId != null && sender.tab.id !== state.tabId) return;
+    switch (msg.type) {
+      case 'AF_OVERLAY_CLOSED': onOverlayClosed(msg.overlay); break;
+      case 'AF_TAB_ORDER_UPDATED': onTabOrderUpdated(msg.tabOrder); break;
+      case 'AF_SR_SEQUENCE_UPDATED': onSrSequenceUpdated(msg.sequence, msg.barrierCount); break;
+      case 'AF_TAB_FOCUS_CHANGED': onTabFocusChanged(msg.index, msg.selector); break;
+      default: break;
+    }
+  }
+
+  /* ------------------------------------------------------------------------
+     Drawers (accordion)
+     ------------------------------------------------------------------------ */
+  function initDrawers() {
+    document.querySelectorAll('.drawer-toggle').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const open = btn.getAttribute('aria-expanded') !== 'true';
+        btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+        $(btn.getAttribute('aria-controls')).hidden = !open;
+        btn.closest('.drawer').classList.toggle('is-open', open);
+        if (open && btn.id === 'drawer-sr-btn') loadVoices();
+      });
+    });
+  }
+
+  /* ------------------------------------------------------------------------
+     PDF
+     ------------------------------------------------------------------------ */
+  async function downloadPdf() {
+    if (!state.result) return;
+    const btn = $('download-pdf');
+    if (typeof window.generateWcagPdfReport !== 'function') { toast('PDF compiler is not available.'); return; }
+    btn.disabled = true;
+    announce('Generating PDF report…');
+    try {
+      const res = await window.generateWcagPdfReport(state.result, { mobileAnalysisByDevice: state.mobileAnalysisByDevice });
+      if (res && res.ok === false) toast(`PDF failed: ${res.error || 'unknown error'}`);
+      else toast(`PDF report saved${res && res.pages ? ` (${res.pages} pages)` : ''}.`);
+    } catch (e) {
+      toast(`PDF failed: ${errMsg(e)}`);
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  /* ------------------------------------------------------------------------
+     New audit
+     ------------------------------------------------------------------------ */
+  async function newAudit() {
+    stopSpeech();
+    state.runId += 1;
+    if (state.tabId != null) await callPage('__auditforgeClearAll', [], { reinject: false });
+    resetOverlayFlags();
+    resetLive();
+    showView('welcome');
+    refreshTargetFromTab();
+  }
+
+  /* ------------------------------------------------------------------------
+     Init
+     ------------------------------------------------------------------------ */
+  function init() {
+    initDrawers();
+    initDeviceControls();
+    initPersonas();
+    syncToggleButtons();
+
+    $('audit-form').addEventListener('submit', (e) => { e.preventDefault(); runAudit(); });
+    $('target-url').addEventListener('input', () => { setUrlError(''); updateFileBanner(); });
+    $('file-banner-settings').addEventListener('click', openExtensionSettings);
+    $('progress-cancel').addEventListener('click', () => { state.runId += 1; showView('welcome'); announce('Audit cancelled.'); });
+    $('new-audit').addEventListener('click', newAudit);
+    $('download-pdf').addEventListener('click', downloadPdf);
+
+    $('wcag-search').addEventListener('input', (e) => { state.search = e.target.value; renderWcagList(); });
+
+    $('mobile-launch').addEventListener('click', launchSimulator);
+    $('mobile-close').addEventListener('click', closeSimulator);
+    $('mobile-window').addEventListener('click', openDeviceWindow);
+    $('mobile-resize').addEventListener('click', resizeWindow);
+
+    $('sr-hud').addEventListener('click', toggleHud);
+    $('sr-skip-hidden').addEventListener('change', (e) => setSkipHidden(e.target.checked));
+    $('sr-earcon-preview').addEventListener('click', () => { if (!playEarcon(state.persona)) toast('Audio is not available.'); });
+    $('sr-readall').addEventListener('click', readAll);
+    $('sr-stop').addEventListener('click', () => { stopSpeech(); announce('Speech stopped.'); });
+    $('sr-rate').addEventListener('input', (e) => { $('sr-rate-out').textContent = `${parseFloat(e.target.value).toFixed(1)}×`; });
+    $('sr-voice').addEventListener('change', (e) => { if (e.target.value.startsWith('tts:')) speech.useTts = true; });
+
+    $('tab-trail').addEventListener('click', toggleTabTrail);
+    document.querySelectorAll('#line-style-group [data-line-style]').forEach((b) => b.addEventListener('click', () => setLineStyle(b.dataset.lineStyle)));
+    $('vision-reset').addEventListener('click', () => applyLens('none'));
+
+    $('error-retry').addEventListener('click', () => { if (state.lastUrl) $('target-url').value = state.lastUrl; runAudit(); });
+    $('error-back').addEventListener('click', () => { showView('welcome'); refreshTargetFromTab(); });
+    $('error-settings').addEventListener('click', openExtensionSettings);
+
+    if (window.speechSynthesis && 'onvoiceschanged' in window.speechSynthesis) {
+      window.speechSynthesis.addEventListener('voiceschanged', loadVoices);
+    }
+
+    if (hasChrome && chrome.runtime && chrome.runtime.onMessage) {
+      chrome.runtime.onMessage.addListener((msg, sender) => { onRuntimeMessage(msg, sender); return false; });
+    }
+    if (hasChrome && chrome.tabs) {
+      // The audited page reloaded/navigated: every overlay is gone.
+      if (chrome.tabs.onUpdated) {
+        chrome.tabs.onUpdated.addListener((tabId, info) => {
+          if (tabId === state.tabId && info.status === 'loading' && state.view === 'results') { resetOverlayFlags(); $('live-tab').hidden = true; $('live-sr').hidden = true; }
+          if (tabId === state.tabId && info.url && state.view === 'welcome') refreshTargetFromTab();
+        });
+      }
+      if (chrome.tabs.onActivated) {
+        chrome.tabs.onActivated.addListener(() => { if (state.view === 'welcome') refreshTargetFromTab(); });
+      }
+    }
+
+    showView('welcome', { focus: false });
+    refreshTargetFromTab();
+    loadVoices();
+  }
+
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
+  else init();
+})();

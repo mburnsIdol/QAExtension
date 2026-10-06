@@ -1,114 +1,66 @@
-# Matt's QA Extension (Chrome Extension)
+# Mattccessibility Tool (Chrome Extension)
 
-A standalone Google Chrome Extension (Manifest V3) styled in an ultra-comfortable **AMOLED Dark Mode** that evaluates any web page against the latest **WCAG 2.2 Level AA** standards, performs interactive **:hover state color contrast verification**, lints **ARIA accessible labels**, analyzes **logical tab navigation order** with an interactive **visual Tab-Trail overlay**, emulates **Color Blindness & Low Vision** (Protanopia, Deuteranopia, Tritanopia, Achromatopsia, Cataracts, Glaucoma, Macular Degeneration, Photophobia), provides a **live Screen Reader & VoiceOver speech synthesizer**, and generates **vector PDF compliance reports**.
-
----
-
-## Key Features
-
-1. **Toolbar Quick-Audit**:
-   - Click the extension icon from Chrome's toolbar.
-   - Pre-fills the active tab's URL automatically.
-   - Enter any custom URL and click **"Run Audit"** to audit.
-
-2. **Strictly Non-Branded & Score-Based**:
-   - Zero vendor branding, user names, outreach proposals, or commercial pricing.
-   - Objective 0–100 compliance scoring formula based on WCAG violation severities.
-   - Grade (A+, A, B, C, D, F) and Risk Rating (Low, Moderate, High, Severe).
-
-3. **Latest WCAG 2.2 Standards**:
-   - Evaluates WCAG 2.2 AA rules (including Target Size Minimum, Focus Appearance, and Accessible Authentication).
-   - Simulates interactive **:hover states** on buttons and links to catch contrast drops when background changes.
-   - Lints ARIA attributes for **WCAG 2.5.3 (Label in Name)**, generic labels, and icon contradictions.
-
-4. **Multi-Platform Screen Reader Emulation Suite (iOS VoiceOver, Android TalkBack, NVDA, Windows Narrator)**:
-   - **Zero Physical Devices Required**: Test and experience the exact auditory announcements, earcon sound profiles, reading order formulas, and gesture/keyboard navigation of all 4 major assistive technologies directly in Chrome!
-   - **1. Apple iOS VoiceOver**:
-     - Announcement Syntax: `[Name], [State], [Role], [Interaction Hint]` (e.g. `"Submit, button, double-tap to activate"`, `"Features, heading level 2"`).
-     - Touch Navigation: Swipe Left (`⬅`), Swipe Right (`➔`), Double-Tap (`👆`), and virtual **Rotor** (`🔄` / `R` key) to cycle categories and jump between Headings, Links, Controls, and Landmarks.
-     - Acoustic Profile: Harmonic crystalline dual-sine bell chime (E5 & C6) and iconic black/purple VoiceOver cursor.
-   - **2. Android TalkBack**:
-     - Announcement Syntax: `[Name], [Role], [State], [Hint]` (e.g. `"Submit, Button, double-tap to activate"`, `"Features, Heading 2"`, `"Remember me, Check box, checked, double-tap to toggle"`).
-     - Touch Navigation: Swipe Left (`⬅`), Swipe Right (`➔`), Double-Tap (`👆`), and **Reading Granularity** (`🔠` / `G` key) selector.
-     - Acoustic Profile: Resonant fluid bubble bloop (frequency drop 460Hz ➔ 280Hz) and TalkBack high-visibility cyan rectangular focus box.
-   - **3. NVDA (NonVisual Desktop Access - Windows)**:
-     - Announcement Syntax: `[Role], [Name], [State]` with role announced first! (e.g. `"Heading level 2, Features"`, `"Button, Submit"`, `"Link, Terms"`).
-     - Desktop Navigation: Virtual Buffer browse mode (`↓ / ↑`), Quick Navigation single-letter keys (`H` for Headings, `K` for Links, `F` for Form fields, `D` for Landmarks), and Enter to activate.
-     - Acoustic Profile: Synthesized crisp square-wave tone chirp (440Hz ➔ 660Hz) and NVDA red focus outline.
-   - **4. Windows Narrator**:
-     - Announcement Syntax: `[Name], [Role], [State], [Scan Position]` (e.g. `"Submit, button"`, `"Features, heading level 2"`, `"Dark mode, toggle switch, on"`).
-     - Desktop Navigation: Scan Mode navigation (`➔ / ⬅`), Quick Keys (`H` Heading, `L` Link, `B` Button, `D` Landmark), and Enter to activate.
-     - Acoustic Profile: Fluent two-tone melodic chime (D5 & A5 soft sine chord) and Windows high-contrast blue focus ring.
-   - **Side-by-Side 4-Reader Comparison Matrix**: Click **"Compare All 4"** to reveal a live cross-platform readout matrix for every element with individual "▶ Listen" speech preview buttons.
-   - **Interactive In-Page Screen Reader HUD**: Click **"Launch On-Page Sim"** to project an interactive glassmorphism HUD bar onto the live website, complete with on-screen gesture touch buttons (`Swipe ⬅`, `Swipe ➔`, `Double-Tap 👆`, `Rotor 🔄` / `Granularity 🔠`), keyboard shortcuts, focus cursor rings, and Web Speech API announcements.
-   - **Dedicated Screen Reader Score (0–100)**: Quantifies auditory ease-of-access, sequential heading hierarchy, ARIA landmarks, silent focus traps, and auditory friction barriers.
-
-5. **Interactive In-Page Issue Navigation & Neon Highlight Ring**:
-   - **One-Click Navigation**: Click any reported issue card or specific element row to immediately scroll your active browser tab directly to the offending element.
-   - **Animated Neon Highlight Ring**: Draws a pulsing, high-visibility highlight ring around the element with color coded severity (Red for Critical, Orange for Serious, Amber for Moderate, Cyan for Minor).
-   - **Floating Diagnostic Badge**: Displays the violation rule, severity tag, and selector directly above the element in the target page, with an "✕" dismiss button (or press `Escape`).
-   - **Screen Reader Timeline Navigation**: Click any VoiceOver / Screen Reader simulation step to highlight that sequential element on the page.
-
-6. **Client-Side PDF Reports**:
-   - Click **"Download PDF Report"** to export an executive, multi-page vector PDF deliverable directly from your browser.
-   - Includes the **"Screen Reader & VoiceOver Compatibility Assessment"** section with score, hierarchy checks, and sequential readout table.
-   - Fully standalone: requires no backend server, node processes, or external network requests.
-
-7. **Logical Tab Navigation Order & Visual Tab-Trail Overlay**:
-   - **Tab Order Audit**: Inspects the exact sequential HTML5 keyboard tab order, calculates flow status (Sequential, Needs Review, Disrupted), and flags `tabindex > 0` anti-patterns.
-   - **Visual Flow Anomaly Detection**: Flags focus stops that contradict top-to-bottom reading order (e.g. unexpected upward focus jumps) and verifies "Skip to main content" links.
-   - **In-Page Tab-Trail Overlay**: Click **"🗺️ Show Tab-Trail Overlay"** to project numbered glowing badges (`#1, #2, #3...`) directly onto each interactive element on the target page, connected by curved directional SVG paths.
-   - **Interactive Tab Sequence Cards**: Browse each focusable stop in the extension panel, view element roles/labels/selectors, and click **"🎯 Locate"** to highlight that element.
-
-8. **Vision Simulation Suite (Color Blindness & Low Vision)**:
-   - **Color Vision Deficiency (CVD) Lenses**:
-     - **Protanopia** (Red-blind / L-cone deficiency)
-     - **Deuteranopia** (Green-blind / M-cone deficiency, ~5% of males)
-     - **Tritanopia** (Blue/Yellow-blind / S-cone deficiency)
-     - **Achromatopsia** (Monochromacy / Complete color blindness)
-   - **Low Vision & Eye Condition Lenses**:
-     - **Cataracts (Blur)**: Simulates cloudy lenses, visual acuity reduction, and washed-out contrast to test readability of typography and controls without sharp focus.
-     - **Glaucoma (Tunnel Vision)**: Simulates peripheral vision loss with an interactive central visual cone that tracks cursor movements across the page.
-     - **Macular Degeneration (Central Scotoma)**: Simulates central field vision loss, placing a blind spot in the direct line of sight.
-     - **Photophobia (Inverted Contrast)**: Simulates high-contrast inverted dark mode for individuals with severe glare and light sensitivity.
-   - **Persistent Floating Reset Pill**: Displays the active simulation state on the webpage with a one-click **"Reset Normal"** button.
+A standalone Chrome extension (Manifest V3) that audits any web page against **WCAG 2.2 Level AA**. It opens in Chrome's side panel next to the page you're testing. Everything runs locally in your browser: there is no server, no account and no tracking.
 
 ---
 
-## Installation Instructions (Chrome / Edge / Brave)
+## Features
 
-1. **Clone or Download** this repository:
-   ```bash
-   git clone https://github.com/mattroburns/AuditExtension.git
-   ```
-   *(Or click **Code** > **Download ZIP** on GitHub and extract the archive).*
-
-2. Open **Google Chrome** (or any Chromium browser such as Microsoft Edge, Brave, or Opera).
-3. Navigate to: `chrome://extensions/` (or `edge://extensions/`).
-4. Toggle on **"Developer mode"** (toggle switch in the top-right corner).
-5. Click the **"Load unpacked"** button in the top-left corner.
-6. Select the downloaded or cloned **`AuditExtension`** folder (the folder containing `manifest.json`).
-7. **Matt's QA Extension** is now installed! Click the **Extensions puzzle piece icon (🧩)** in your browser toolbar, find the extension, and click the **Pin (📌)** icon to keep it visible on your toolbar.
-
----
-
-## How to Run an Audit
-
-1. Navigate to any website you want to test (e.g. `https://example.com` or `https://news.ycombinator.com`).
-2. Click the **Matt's QA Extension** icon in the browser toolbar.
-3. The current page's URL will automatically appear in the input field.
-4. Click **"⚡ Run Audit"** (or press Enter):
-   - The extension will inject the WCAG 2.2 engine into the page.
-   - Within 2–4 seconds, the full audit scorecard, key metrics, and issues table will render.
-5. **Locate & Highlight Issues on the Page**:
-   - Click **"🎯 Locate"** on any violation card header to jump directly to the first affected element on the page.
-   - Expand **"▼ Details"** and click any element card or the **"🎯 Highlight"** button to smoothly scroll the browser directly to that specific element and display the pulsing highlight ring and diagnostic badge.
-   - In the **Screen Reader Speech & Rotor Simulation** drawer, click any readout card or **"🎯 Locate"** to highlight that auditory element in page context.
-   - Press **Escape** or click **"✕"** on the floating badge to dismiss the highlight ring.
-6. Click **"📄 Download PDF Report"** to immediately save the complete compliance report as a vector PDF.
+1. **WCAG 2.2 AA audit**
+   - Runs Deque axe-core with the WCAG 2.0, 2.1 and 2.2 A/AA rule tags.
+   - Adds an ARIA linter: label in name (2.5.3), generic labels such as `aria-label="button"`, and icon contradictions such as an ✕ icon labelled "Search".
+   - Checks text and boundary contrast in the **`:hover` state**, not just at rest, and suggests CSS fixes.
+   - Gives a 0–100 compliance score, a grade from A+ to F, and a risk level.
+2. **Screen reader simulation** for Apple iOS VoiceOver, Android TalkBack, NVDA and Windows Narrator.
+   - Each uses its own announcement order and synthesised sound cues (earcons), with live speech.
+   - An on-page HUD lets you navigate the page as each screen reader would: swipe, double-tap, rotor or granularity, and quick-nav keys.
+   - Gives a separate 0–100 screen reader score covering headings, landmarks, labels, focus and image text.
+3. **Tab order and Tab-Trail overlay**
+   - Shows the keyboard focus order, flags positive `tabindex`, and checks the skip link.
+   - Draws numbered badges joined by curved lines across the page. Lines are coloured red or amber where focus jumps up or backwards.
+4. **Mobile and responsive layout audit**
+   - Checks the viewport meta tag, overlapping elements, horizontal overflow, touch targets under 24×24px (AA) or 44×44px (advisory), crowded targets, and sticky elements that cover more than 30% of the screen.
+   - An **in-page phone simulator** shows the page on iPhone 16 / 15 Pro, iPhone SE, Galaxy S24, Pixel 8 or iPhone 16 Pro Max. It has a rotate button, drag-to-scroll touch emulation, and a drawer listing that device's issues.
+5. **Vision and reading impairment lenses**
+   - Colour vision: protanopia, deuteranopia, tritanopia and achromatopsia.
+   - Low vision: cataracts, glaucoma, macular degeneration, diabetic retinopathy, reduced contrast sensitivity, severe myopia and photophobia.
+   - Other: astigmatism / diplopia and visual snow.
+   - A floating "Reset Normal" button turns the lens off.
+6. **Link integrity:** flags empty `href`, `javascript:void(0)`, anchors pointing at ids that don't exist, `target="_blank"` without `rel="noopener noreferrer"`, and generic link text such as "click here".
+7. **Element highlighter and fix preview**
+   - "🎯 Locate" scrolls to any issue and draws a pulsing ring around it, with a diagnostic badge.
+   - "Preview Fix" applies the suggested CSS live on the page so you can check it. "Revert" undoes it.
+8. **PDF report:** a multi-page vector PDF with a cover scorecard and sections for violations, screen reader, tab navigation and mobile layout. It's generated entirely in the browser.
 
 ---
 
-## Changelog
+## Installation (Chrome / Edge / Brave)
 
-See [CHANGELOG.md](CHANGELOG.md) for a detailed history of recent updates, UI modernizations, and report enhancements.
+1. Open `chrome://extensions/` (or `edge://extensions/`).
+2. Turn on **Developer mode**.
+3. Click **Load unpacked** and select the `AuditExtension` folder (the one containing `manifest.json`).
+4. Pin **Mattccessibility Tool** from the extensions menu (🧩).
+5. *(Optional)* To audit local `file://` pages, open the extension's **Details** page and turn on **Allow access to file URLs**.
+
+## Running an audit
+
+1. Go to the page you want to test, then click the extension icon to open the side panel.
+2. The current page's URL is filled in for you. You can change it if you want to audit a different page.
+3. Click **⚡ Run Audit**. The audit runs in four stages: navigate → inject the rules → audit → build the scorecard.
+4. Open each drawer to see that area's results. Use **🎯 Locate** to find an issue on the page, and the simulator buttons to try the on-page tools.
+5. Click **📄 Download PDF Report** to save `WCAG_2.2_Compliance_Report.pdf`.
+
+## Permissions
+
+| Permission | Why it's needed |
+|---|---|
+| `sidePanel` | Shows the auditor next to the page. |
+| `scripting`, `activeTab`, `tabs` | Injects axe-core and the audit engine into the page you're testing, and handles navigation. |
+| `declarativeNetRequest` | Removes frame-blocking headers on sub-frames so sites can load inside the phone simulator. |
+| `downloads` | Saves the PDF report. |
+| `tts` | Backup text-to-speech if the Web Speech API isn't available. |
+| `storage` | Saves your preferences. |
+
+> **Security note:** to make the phone simulator work, the `declarativeNetRequest` rule removes `X-Frame-Options`, CSP and cross-origin isolation headers from **every** sub-frame response while the extension is enabled. That weakens clickjacking protection for embedded frames on every site you browse. Disable the extension when you're not using it.
+
+See [CHANGELOG.md](CHANGELOG.md) for the version history.

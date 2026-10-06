@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
-  "name": "Matt's QA Extension",
-  "version": "1.0.0",
+  "name": "Mattccessibility Tool",
+  "version": "1.4.0",
   "description": "Automated QA accessibility auditor evaluating web pages against WCAG 2.2 AA standards with interactive :hover contrast, ARIA linter, tab navigation trail, color blindness lens, and vector PDF exports.",
   "icons": {
     "16": "icons/icon-16.png",
@@ -9,7 +9,7 @@
     "128": "icons/icon-128.png"
   },
   "action": {
-    "default_title": "Matt's QA Extension",
+    "default_title": "Mattccessibility Tool",
     "default_icon": {
       "16": "icons/icon-16.png",
       "48": "icons/icon-48.png",
@@ -29,9 +29,11 @@
     "downloads",
     "tabs",
     "sidePanel",
-    "tts"
+    "tts",
+    "declarativeNetRequest"
   ],
   "host_permissions": [
-    "<all_urls>"
+    "<all_urls>",
+    "file:///*"
   ]
 }

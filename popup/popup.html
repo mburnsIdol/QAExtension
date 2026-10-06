@@ -1,583 +1,289 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Matt's QA Extension</title>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mattccessibility Tool</title>
   <link rel="stylesheet" href="popup.css">
 </head>
 <body>
-  <div class="popup-shell">
-    
-    <!-- Top Header -->
-    <header class="popup-header">
-      <div class="header-title-group">
-        <div class="header-icon">
-          <svg class="header-icon-svg" width="28" height="28" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg" aria-label="QA Accessibility Logo">
-            <circle cx="100" cy="100" r="92" fill="#0D9FBA"/>
-            <circle cx="100" cy="46" r="14.5" fill="#000000"/>
-            <path fill="#000000" d="M 34,74 C 28,74 24,78.5 24,84 C 24,89.5 28,94 34,94 L 76,94 C 82,94 85.5,99 85.5,106 L 83,124 L 71,164 C 69,170 74,176 80,176 C 84.5,176 88,172.5 90,167 L 99,134 C 99.5,131.5 100.5,131.5 101,134 L 110,167 C 112,172.5 115.5,176 120,176 C 126,176 131,170 129,164 L 117,124 L 114.5,106 C 114.5,99 118,94 124,94 L 166,94 C 172,94 176,89.5 176,84 C 176,78.5 172,74 166,74 Z"/>
-          </svg>
-        </div>
-        <div>
-          <h1 class="header-title">Matt's QA Extension</h1>
-          <p class="header-subtitle">WCAG 2.2 Level AA &bull; Visual & Auditory QA</p>
-        </div>
-      </div>
-      <div class="header-right-actions">
-        <div class="standard-pill">
-          <span class="pulse-dot"></span>
-          <span>WCAG 2.2 AA</span>
-        </div>
-      </div>
-    </header>
+  <header class="app-header">
+    <img class="app-logo" src="../icons/icon-48.png" alt="" width="24" height="24">
+    <div class="app-brand">
+      <span class="app-name">Mattccessibility Tool</span>
+      <span class="app-sub">WCAG 2.2 AA auditor</span>
+    </div>
+    <span class="app-version">v1.4.0</span>
+  </header>
 
-    <!-- Vision Simulation Suite (Color Blindness & Low Vision Drawer) -->
-    <section class="cvd-section" id="section-cvd">
-      <div class="cvd-header" id="cvd-header-toggle">
-        <div class="cvd-header-title">
-          <span class="cvd-header-icon">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/></svg>
-          </span>
+  <main id="main" class="app-main">
+
+    <!-- ================= WELCOME ================= -->
+    <section id="welcome-view" class="view" aria-labelledby="welcome-title">
+      <div class="panel hero">
+        <h1 id="welcome-title" class="h1" tabindex="-1">Audit a page against WCAG&nbsp;2.2&nbsp;AA</h1>
+        <p class="lead">Runs axe-core plus <code>:hover</code> contrast, ARIA labelling, screen reader, tab order, link and mobile layout checks on the active tab.</p>
+
+        <form id="audit-form" class="stack-2" novalidate>
           <div>
-            <h3 class="cvd-heading">Vision & Color Deficiency Simulation</h3>
-            <p class="cvd-subheading" title="Live simulation of 9 color blindness & low vision conditions">Live simulation of 9 color blindness & low vision conditions</p>
-          </div>
-        </div>
-        <div class="cvd-badge-group">
-          <span id="cvd-status-badge" class="cvd-status-badge">Normal Spectrum</span>
-          <button type="button" id="cvd-toggle-btn" class="cvd-toggle-btn">▼ Open Lenses</button>
-        </div>
-      </div>
-
-      <div id="cvd-panel-body" class="cvd-panel-body hidden">
-        <div class="cvd-container">
-          <!-- Color Blindness -->
-          <div class="cvd-row">
-            <div class="cvd-title-group">
-              <span class="cvd-icon">
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/></svg>
-              </span>
-              <span class="cvd-title">Color Blindness:</span>
-            </div>
-            <div class="cvd-pills" id="cvd-pills">
-              <button type="button" class="cvd-pill active" data-cvd="none" title="Normal visual spectrum">Normal</button>
-              <button type="button" class="cvd-pill" data-cvd="protanopia" title="Protanopia: Red-blind / Red-weak simulation (~1.3% males)">Protanopia</button>
-              <button type="button" class="cvd-pill" data-cvd="deuteranopia" title="Deuteranopia: Green-blind / Green-weak simulation (~5% males, most common)">Deuteranopia</button>
-              <button type="button" class="cvd-pill" data-cvd="tritanopia" title="Tritanopia: Blue/Yellow-blind simulation (rare)">Tritanopia</button>
-              <button type="button" class="cvd-pill" data-cvd="achromatopsia" title="Achromatopsia: Monochromacy / Complete color blindness">Monochrome</button>
-            </div>
+            <label for="target-url" class="label">Target URL</label>
+            <input id="target-url" class="input" type="url" inputmode="url" autocomplete="url" spellcheck="false"
+                   placeholder="https://example.com" aria-describedby="target-url-hint target-url-error">
+            <p id="target-url-hint" class="hint">Filled in from the active tab. Change it to load a different page in that tab first.</p>
+            <p id="target-url-error" class="field-error" hidden></p>
           </div>
 
-          <!-- Low Vision & Eye Conditions -->
-          <div class="cvd-row cvd-row-lowvision">
-            <div class="cvd-title-group">
-              <span class="cvd-icon lowvision-icon">
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>
-              </span>
-              <span class="cvd-title">Low Vision:</span>
-            </div>
-            <div class="cvd-pills">
-              <button type="button" class="cvd-pill" data-cvd="cataracts" title="Cataracts: Acuity loss, cloudy lens, and contrast wash">Cataracts (Blur)</button>
-              <button type="button" class="cvd-pill" data-cvd="glaucoma" title="Glaucoma: Severe peripheral vision loss (Tunnel Vision)">Glaucoma (Tunnel)</button>
-              <button type="button" class="cvd-pill" data-cvd="macular" title="Macular Degeneration: Central vision loss / Scotoma">Macular (Central)</button>
-              <button type="button" class="cvd-pill" data-cvd="photophobia" title="Photophobia: Extreme glare sensitivity (Inverted High Contrast)">Photophobia</button>
-            </div>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <!-- Welcome / Empty State View (Visible before audit is run) -->
-    <section id="welcome-view" class="welcome-view">
-      <div class="welcome-card">
-        <h2 class="welcome-title">WCAG and Accessibility Audit</h2>
-        <p class="welcome-desc">
-          Evaluate your web page against WCAG 2.2 Level AA guidelines, test multi-platform screen reader speech synthesizers, inspect keyboard tab flow, and verify link health.
-        </p>
-
-        <form id="audit-form" class="welcome-target-form">
-          <div class="welcome-target-box">
-            <label for="input-url" class="welcome-target-label">
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
-              <span>Target Page:</span>
-            </label>
-            <input 
-              type="text" 
-              id="input-url" 
-              class="welcome-url-input" 
-              placeholder="Enter web page URL (e.g., https://example.com)" 
-              required 
-              autocomplete="off" 
-              spellcheck="false"
-            >
+          <div id="file-banner" class="banner banner-warn" role="note" hidden>
+            <p class="banner-title"><span aria-hidden="true">⚠️</span> File access is turned off</p>
+            <p>To audit <code>file://</code> pages, open the extension's details page and turn on <strong>Allow access to file URLs</strong>.</p>
+            <button type="button" id="file-banner-settings" class="btn btn-sm">Open extension settings</button>
           </div>
 
-          <button type="submit" id="btn-welcome-scan" class="btn btn-welcome-scan">
-            <span class="btn-icon">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-            </span>
-            <span class="btn-text">Run Complete Audit</span>
+          <button type="submit" id="run-audit" class="btn btn-primary btn-lg btn-block">
+            <span aria-hidden="true">⚡</span> Run Audit
           </button>
         </form>
+      </div>
 
-        <div class="welcome-features-grid">
-          <div class="welcome-feature-card">
-            <span class="wf-badge-icon">🛡️</span>
-            <div>
-              <strong>WCAG 2.2 AA Rules</strong>
-              <p>Automated axe-core, target size, text contrast & ARIA semantics</p>
-            </div>
-          </div>
-          <div class="welcome-feature-card">
-            <span class="wf-badge-icon">🔗</span>
-            <div>
-              <strong>Link Health Auditor</strong>
-              <p>Live HTTP status checks, 404 detection & anchor targets</p>
-            </div>
-          </div>
-          <div class="welcome-feature-card">
-            <span class="wf-badge-icon">⌨️</span>
-            <div>
-              <strong>Keyboard Tab Trail</strong>
-              <p>Visual reading flow analysis & in-page sequential overlay map</p>
-            </div>
-          </div>
-          <div class="welcome-feature-card">
-            <span class="wf-badge-icon">🔊</span>
-            <div>
-              <strong>4 Screen Readers</strong>
-              <p>VoiceOver, TalkBack, NVDA & Narrator speech simulation</p>
-            </div>
-          </div>
+      <ul class="feature-list" aria-label="Included checks">
+        <li><span class="dot dot-cyan" aria-hidden="true"></span>WCAG 2.2 AA rules and code fixes</li>
+        <li><span class="dot dot-magenta" aria-hidden="true"></span>Screen reader simulation (4 personas)</li>
+        <li><span class="dot dot-amber" aria-hidden="true"></span>Mobile layout and device simulator</li>
+        <li><span class="dot dot-green" aria-hidden="true"></span>Tab-trail, vision lenses and link integrity</li>
+      </ul>
+    </section>
+
+    <!-- ================= PROGRESS ================= -->
+    <section id="progress-view" class="view" aria-labelledby="progress-title" hidden>
+      <div class="panel">
+        <h1 id="progress-title" class="h1" tabindex="-1">Auditing page…</h1>
+        <p id="progress-url" class="url-line"></p>
+        <div id="progress-bar" class="progress-bar" role="progressbar" aria-label="Audit progress"
+             aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+          <div id="progress-fill" class="progress-fill"></div>
         </div>
+        <ol id="progress-steps" class="progress-steps">
+          <li class="step" data-step="0"><span class="step-icon" aria-hidden="true"></span><span class="step-text">Navigating to Target URL</span><span class="step-state sr-only"></span></li>
+          <li class="step" data-step="1"><span class="step-icon" aria-hidden="true"></span><span class="step-text">Injecting WCAG 2.2 Ruleset &amp; axe-core</span><span class="step-state sr-only"></span></li>
+          <li class="step" data-step="2"><span class="step-icon" aria-hidden="true"></span><span class="step-text">Auditing DOM, :hover contrast, and ARIA labels</span><span class="step-state sr-only"></span></li>
+          <li class="step" data-step="3"><span class="step-icon" aria-hidden="true"></span><span class="step-text">Compiling compliance scorecard</span><span class="step-state sr-only"></span></li>
+        </ol>
+        <p id="progress-detail" class="hint"></p>
+        <button type="button" id="progress-cancel" class="btn btn-ghost btn-sm">Cancel</button>
       </div>
     </section>
 
-    <!-- Loading / Progress State -->
-    <section id="scan-progress" class="scan-progress hidden">
-      <div class="progress-spinner"></div>
-      <div class="progress-details">
-        <h3 id="progress-title">Auditing Target Page...</h3>
-        <p id="progress-sub">Evaluating DOM tree against WCAG 2.2 Level AA, :hover contrast, and ARIA rules...</p>
+    <!-- ================= RESULTS ================= -->
+    <section id="results-view" class="view" aria-labelledby="results-title" hidden>
+      <h1 id="results-title" class="sr-only" tabindex="-1">Audit results</h1>
+
+      <div class="panel scorecard">
+        <div class="score-top">
+          <div id="score-ring" class="score-ring"></div>
+          <div class="score-meta">
+            <div class="badges">
+              <span id="grade-badge" class="grade-badge"></span>
+              <span id="risk-pill" class="chip"></span>
+            </div>
+            <p id="result-title" class="result-title"></p>
+            <p id="result-url" class="url-line"></p>
+            <p id="result-stamp" class="meta-line"></p>
+          </div>
+        </div>
+        <ul id="count-chips" class="sev-stats" aria-label="Violations by severity"></ul>
+        <p id="score-foot" class="meta-line score-foot"></p>
+      </div>
+
+      <div id="stage-warnings" class="banner banner-warn" role="note" hidden></div>
+
+      <div class="action-bar">
+        <button type="button" id="new-audit" class="btn">New Audit</button>
+        <button type="button" id="download-pdf" class="btn btn-primary"><span aria-hidden="true">📄</span> Download PDF Report</button>
+      </div>
+
+      <div class="drawers">
+        <!-- 1. WCAG -->
+        <section class="drawer" data-drawer="wcag">
+          <h2 class="drawer-h">
+            <button type="button" class="drawer-toggle" id="drawer-wcag-btn" aria-expanded="false" aria-controls="drawer-wcag">
+              <span class="drawer-icon icon-cyan" aria-hidden="true">⚠</span>
+              <span class="drawer-title">WCAG 2.2 AA Issues</span>
+              <span class="drawer-badge" id="badge-wcag"></span>
+              <span class="chev" aria-hidden="true"></span>
+            </button>
+          </h2>
+          <div class="drawer-panel" id="drawer-wcag" role="region" aria-labelledby="drawer-wcag-btn" hidden>
+            <div class="toolbar">
+              <label for="wcag-search" class="sr-only">Search issues</label>
+              <input id="wcag-search" class="input input-sm grow" type="search" placeholder="Search rules, selectors, SC…">
+            </div>
+            <div class="seg" role="group" aria-label="Filter by severity" id="wcag-filters"></div>
+            <p id="wcag-count" class="meta-line" aria-live="polite"></p>
+            <div id="wcag-list"></div>
+          </div>
+        </section>
+
+        <!-- 2. Mobile -->
+        <section class="drawer" data-drawer="mobile">
+          <h2 class="drawer-h">
+            <button type="button" class="drawer-toggle" id="drawer-mobile-btn" aria-expanded="false" aria-controls="drawer-mobile">
+              <span class="drawer-icon icon-amber" aria-hidden="true">▯</span>
+              <span class="drawer-title">Mobile &amp; Responsive Layout</span>
+              <span class="drawer-badge" id="badge-mobile"></span>
+              <span class="chev" aria-hidden="true"></span>
+            </button>
+          </h2>
+          <div class="drawer-panel" id="drawer-mobile" role="region" aria-labelledby="drawer-mobile-btn" hidden>
+            <div class="toolbar">
+              <div class="field-inline grow">
+                <label for="device-select" class="label">Device</label>
+                <select id="device-select" class="input input-sm"></select>
+              </div>
+              <div class="seg seg-joined" role="group" aria-label="Orientation" id="orientation-group">
+                <button type="button" class="seg-btn" data-orientation="portrait" aria-pressed="true">Portrait</button>
+                <button type="button" class="seg-btn" data-orientation="landscape" aria-pressed="false">Landscape</button>
+              </div>
+            </div>
+            <div class="btn-row">
+              <button type="button" id="mobile-launch" class="btn btn-tint btn-sm"><span aria-hidden="true">📱</span> Launch Simulator</button>
+              <button type="button" id="mobile-close" class="btn btn-sm" hidden>Close Simulator</button>
+              <button type="button" id="mobile-window" class="btn btn-ghost btn-sm">Open Device Window</button>
+              <button type="button" id="mobile-resize" class="btn btn-ghost btn-sm">Resize Window</button>
+            </div>
+            <div id="mobile-body"></div>
+          </div>
+        </section>
+
+        <!-- 3. Screen reader -->
+        <section class="drawer" data-drawer="sr">
+          <h2 class="drawer-h">
+            <button type="button" class="drawer-toggle" id="drawer-sr-btn" aria-expanded="false" aria-controls="drawer-sr">
+              <span class="drawer-icon icon-magenta" aria-hidden="true">◉</span>
+              <span class="drawer-title">Screen Reader &amp; VoiceOver Simulation</span>
+              <span class="live-pill" id="live-sr" hidden><span aria-hidden="true">●</span> Live</span>
+              <span class="drawer-badge" id="badge-sr"></span>
+              <span class="chev" aria-hidden="true"></span>
+            </button>
+          </h2>
+          <div class="drawer-panel" id="drawer-sr" role="region" aria-labelledby="drawer-sr-btn" hidden>
+            <div class="seg seg-grid" role="group" aria-label="Screen reader persona" id="persona-group"></div>
+            <div class="btn-row">
+              <button type="button" id="sr-hud" class="btn btn-tint btn-sm">Launch On-Page HUD</button>
+              <label class="switch"><input type="checkbox" role="switch" id="sr-skip-hidden" checked><span class="switch-track" aria-hidden="true"></span>Skip content hidden from view</label>
+            </div>
+
+            <div id="sr-score" class="section"></div>
+
+            <div class="section">
+              <div class="section-head">
+                <h3 class="h3">Speech timeline</h3>
+                <span id="sr-live-note" class="meta-line"></span>
+              </div>
+              <div class="player">
+                <div class="btn-row">
+                  <button type="button" id="sr-readall" class="btn btn-sm"><span aria-hidden="true">▶</span> Read All</button>
+                  <button type="button" id="sr-stop" class="btn btn-sm" disabled><span aria-hidden="true">■</span> Stop</button>
+                  <label class="check"><input type="checkbox" id="sr-earcons" checked> Earcons</label>
+                  <button type="button" id="sr-earcon-preview" class="btn btn-ghost btn-sm"><span aria-hidden="true">♪</span> Preview earcon</button>
+                </div>
+                <div class="player-grid">
+                  <div class="field-inline">
+                    <label for="sr-rate" class="label">Speed</label>
+                    <input type="range" id="sr-rate" min="0.5" max="2" step="0.1" value="1" aria-describedby="sr-rate-out">
+                    <output id="sr-rate-out" for="sr-rate" class="num">1.0×</output>
+                  </div>
+                  <div class="field-inline">
+                    <label for="sr-voice" class="label">Voice</label>
+                    <select id="sr-voice" class="input input-sm"><option value="">Default voice</option></select>
+                  </div>
+                </div>
+              </div>
+              <ol id="sr-timeline" class="rows scroll-list"></ol>
+            </div>
+
+            <div id="sr-structure"></div>
+          </div>
+        </section>
+
+        <!-- 4. Tab order -->
+        <section class="drawer" data-drawer="tab">
+          <h2 class="drawer-h">
+            <button type="button" class="drawer-toggle" id="drawer-tab-btn" aria-expanded="false" aria-controls="drawer-tab">
+              <span class="drawer-icon icon-green" aria-hidden="true">⇥</span>
+              <span class="drawer-title">Tab Navigation Order</span>
+              <span class="live-pill" id="live-tab" hidden><span aria-hidden="true">●</span> Live</span>
+              <span class="drawer-badge" id="badge-tab"></span>
+              <span class="chev" aria-hidden="true"></span>
+            </button>
+          </h2>
+          <div class="drawer-panel" id="drawer-tab" role="region" aria-labelledby="drawer-tab-btn" hidden>
+            <div class="toolbar">
+              <button type="button" id="tab-trail" class="btn btn-tint btn-sm">Show Tab-Trail</button>
+              <div class="seg seg-joined" role="group" aria-label="Tab-Trail line style" id="line-style-group">
+                <button type="button" class="seg-btn" data-line-style="straight" aria-pressed="true">Straight</button>
+                <button type="button" class="seg-btn" data-line-style="curved" aria-pressed="false">Curved</button>
+              </div>
+            </div>
+            <div id="tab-body"></div>
+          </div>
+        </section>
+
+        <!-- 5. Vision -->
+        <section class="drawer" data-drawer="vision">
+          <h2 class="drawer-h">
+            <button type="button" class="drawer-toggle" id="drawer-vision-btn" aria-expanded="false" aria-controls="drawer-vision">
+              <span class="drawer-icon icon-cyan" aria-hidden="true">◐</span>
+              <span class="drawer-title">Vision &amp; Reading Impairment Suite</span>
+              <span class="drawer-badge" id="badge-vision">13 lenses</span>
+              <span class="chev" aria-hidden="true"></span>
+            </button>
+          </h2>
+          <div class="drawer-panel" id="drawer-vision" role="region" aria-labelledby="drawer-vision-btn" hidden>
+            <div class="toolbar">
+              <p id="vision-status" class="meta-line">No lens active.</p>
+              <button type="button" id="vision-reset" class="btn btn-ghost btn-sm">Reset</button>
+            </div>
+            <div id="vision-body"></div>
+          </div>
+        </section>
+
+        <!-- 6. Links -->
+        <section class="drawer" data-drawer="links">
+          <h2 class="drawer-h">
+            <button type="button" class="drawer-toggle" id="drawer-links-btn" aria-expanded="false" aria-controls="drawer-links">
+              <span class="drawer-icon icon-magenta" aria-hidden="true">⛓</span>
+              <span class="drawer-title">Link Integrity &amp; Broken Links</span>
+              <span class="drawer-badge" id="badge-links"></span>
+              <span class="chev" aria-hidden="true"></span>
+            </button>
+          </h2>
+          <div class="drawer-panel" id="drawer-links" role="region" aria-labelledby="drawer-links-btn" hidden>
+            <div id="links-body"></div>
+          </div>
+        </section>
       </div>
     </section>
 
-    <!-- Error State -->
-    <section id="error-view" class="error-view hidden">
-      <div class="error-badge">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#ef4444" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-      </div>
-      <div class="error-content">
-        <h4>Scan Could Not Complete</h4>
-        <p id="error-message">Unable to execute audit on this page.</p>
+    <!-- ================= ERROR ================= -->
+    <section id="error-view" class="view" aria-labelledby="error-title" hidden>
+      <div class="panel">
+        <div class="error-icon" aria-hidden="true">!</div>
+        <h1 id="error-title" class="h1" tabindex="-1">Something went wrong</h1>
+        <p id="error-message" class="lead"></p>
+        <div id="error-help" class="error-help"></div>
+        <ul id="error-details" class="error-details" hidden></ul>
+        <div class="btn-row">
+          <button type="button" id="error-retry" class="btn btn-primary btn-sm">Try Again</button>
+          <button type="button" id="error-settings" class="btn btn-sm" hidden>Open extension settings</button>
+          <button type="button" id="error-back" class="btn btn-sm">Back</button>
+        </div>
       </div>
     </section>
+  </main>
 
-    <!-- Audit Results Dashboard (Hidden until scan finishes) -->
-    <main id="results-view" class="results-view hidden">
-      
-      <!-- Executive Overview Banner -->
-      <section class="overview-banner">
-        <div class="overview-header-row">
-          <div class="overview-page-info">
-            <h2 id="result-title" class="target-title">Target Page</h2>
-            <a id="result-url" class="target-link" href="#" target="_blank" rel="noopener" title="Open inspected URL in a new tab">https://...</a>
-          </div>
+  <div id="af-live" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
+  <div id="toast" class="toast" aria-hidden="true"></div>
 
-          <div class="overview-actions">
-            <span class="scan-time-pill" title="Audit scan duration">
-              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-              <strong id="result-duration">--s</strong>
-            </span>
-            <button id="btn-new-audit" class="btn btn-new-audit" title="Return to audit entry screen to audit a new URL">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
-              <span>New Audit</span>
-            </button>
-            <button id="btn-export-pdf" class="btn btn-pdf" title="Export executive accessibility audit report as PDF">
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
-              <span>Export PDF Report</span>
-            </button>
-          </div>
-        </div>
-
-        <!-- 4 Failure Counters Grid -->
-        <div class="failures-summary-grid">
-          <div class="failure-kpi-card" id="kpi-card-wcag" data-target="section-issues" title="WCAG 2.2 accessibility rule violations (Click to inspect)">
-            <div class="failure-kpi-icon-wrap kpi-icon-wcag">
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="7.86 2 16.14 2 22 7.86 22 16.14 16.14 22 7.86 22 2 16.14 2 7.86 7.86 2"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-            </div>
-            <div class="failure-kpi-details">
-              <span class="failure-kpi-label">WCAG Failures</span>
-              <span class="failure-kpi-val" id="kpi-wcag-count">0</span>
-            </div>
-          </div>
-
-          <div class="failure-kpi-card" id="kpi-card-links" data-target="section-links" title="Dead links, 404s, or broken anchors (Click to inspect)">
-            <div class="failure-kpi-icon-wrap kpi-icon-links">
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
-            </div>
-            <div class="failure-kpi-details">
-              <span class="failure-kpi-label">Link Failures</span>
-              <span class="failure-kpi-val" id="kpi-links-count">0</span>
-            </div>
-          </div>
-
-          <div class="failure-kpi-card" id="kpi-card-tab" data-target="section-tabs" title="Positive tabindex or disrupted tab navigation (Click to inspect)">
-            <div class="failure-kpi-icon-wrap kpi-icon-tab">
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2" ry="2"/><path d="m6 8 4 4-4 4"/><path d="M12 16h6"/></svg>
-            </div>
-            <div class="failure-kpi-details">
-              <span class="failure-kpi-label">Tab Failures</span>
-              <span class="failure-kpi-val" id="kpi-tab-count">0</span>
-            </div>
-          </div>
-
-          <div class="failure-kpi-card" id="kpi-card-sr" data-target="section-sr" title="Screen reader communication barriers (Click to inspect)">
-            <div class="failure-kpi-icon-wrap kpi-icon-sr">
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>
-            </div>
-            <div class="failure-kpi-details">
-              <span class="failure-kpi-label">Screen Reader Barriers</span>
-              <span class="failure-kpi-val" id="kpi-sr-count">0</span>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <!-- Bulk Drawer Controls -->
-      <div class="drawers-bulk-bar">
-        <div class="bulk-actions-group">
-          <button type="button" id="btn-expand-all" class="btn-drawer-bulk" title="Expand all collapsible sections">
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="7 13 12 18 17 13"/><polyline points="7 6 12 11 17 6"/></svg>
-            <span>Expand All</span>
-          </button>
-          <button type="button" id="btn-collapse-all" class="btn-drawer-bulk" title="Collapse all sections">
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="17 11 12 6 7 11"/><polyline points="17 18 12 13 7 18"/></svg>
-            <span>Collapse All</span>
-          </button>
-        </div>
-      </div>
-
-      <!-- 1. WCAG Issues Table & Technical Fixes Drawer -->
-      <section class="issues-section" id="section-issues">
-        <div class="issues-header" id="issues-header-toggle">
-          <div class="issues-header-title">
-            <span class="issues-icon">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-            </span>
-            <div>
-              <h3 class="issues-title">WCAG 2.2 Issues Table & Technical Fixes</h3>
-              <p class="issues-subtitle" title="Inspect exact CSS selectors, offending HTML, contrast calculations, and code fixes">Inspect exact CSS selectors, offending HTML, contrast calculations, and code fixes</p>
-            </div>
-          </div>
-          <div class="issues-badge-group">
-            <span id="issues-status-badge" class="issues-status-badge">-- Issues</span>
-            <button type="button" id="issues-toggle-btn" class="issues-toggle-btn">▲ Hide Issues</button>
-          </div>
-        </div>
-
-        <div id="issues-panel-body" class="issues-panel-body">
-          <!-- Severity Filter Tabs Bar -->
-          <div class="issues-filter-bar">
-            <span class="issues-filter-label">Filter Severity:</span>
-            <div class="filter-tabs">
-              <button type="button" class="filter-btn active" data-filter="all">All (<span id="tab-count-all">0</span>)</button>
-              <button type="button" class="filter-btn filter-crit" data-filter="critical">Critical (<span id="tab-count-crit">0</span>)</button>
-              <button type="button" class="filter-btn filter-ser" data-filter="serious">Serious (<span id="tab-count-ser">0</span>)</button>
-              <button type="button" class="filter-btn filter-mod" data-filter="moderate">Moderate (<span id="tab-count-mod">0</span>)</button>
-            </div>
-          </div>
-
-          <!-- Issues List Accordion -->
-          <div id="issues-list" class="issues-list">
-            <!-- Dynamically populated -->
-          </div>
-        </div>
-      </section>
-
-      <!-- 2. Link Health & Broken Link Checker Drawer -->
-      <section class="link-checker-section" id="section-links">
-        <div class="link-checker-header" id="link-checker-header-toggle">
-          <div class="link-checker-header-title">
-            <span class="link-checker-icon">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
-            </span>
-            <div>
-              <h3 class="link-checker-title">Link Health & Broken Link Checker</h3>
-              <p class="link-checker-subtitle" title="HTTP response audit, 404 detection, broken anchor verification & in-page link spotlight">HTTP response audit, 404 detection, broken anchor verification & in-page link spotlight</p>
-            </div>
-          </div>
-          <div class="link-checker-badge-group">
-            <span id="link-checker-status-badge" class="link-checker-status-badge">-- Links</span>
-            <button type="button" id="link-checker-toggle-btn" class="link-checker-toggle-btn">▼ View Links</button>
-          </div>
-        </div>
-
-        <div id="link-checker-panel-body" class="link-checker-panel-body hidden">
-          <div class="link-checker-summary-strip">
-            <div class="link-checker-strip-item">
-              <span class="link-checker-strip-label">Total Links:</span>
-              <strong id="link-total-count" class="link-val">0</strong>
-            </div>
-            <div class="link-checker-strip-item">
-              <span class="link-checker-strip-label">Broken (404/5xx):</span>
-              <strong id="link-broken-count" class="link-val link-val-broken">0</strong>
-            </div>
-            <div class="link-checker-strip-item">
-              <span class="link-checker-strip-label">Warnings:</span>
-              <strong id="link-warning-count" class="link-val link-val-warning">0</strong>
-            </div>
-            <div class="link-checker-strip-item">
-              <span class="link-checker-strip-label">Working:</span>
-              <strong id="link-working-count" class="link-val link-val-working">0</strong>
-            </div>
-          </div>
-
-          <!-- Actions & Live Progress Bar -->
-          <div class="link-checker-actions-bar">
-            <div class="link-progress-wrapper" id="link-progress-wrapper">
-              <div class="link-progress-bar-track">
-                <div id="link-progress-bar-fill" class="link-progress-bar-fill" style="width: 0%;"></div>
-              </div>
-              <span id="link-progress-label" class="link-progress-label">Ready to check</span>
-            </div>
-            <button type="button" id="btn-recheck-links" class="btn-recheck-links" title="Re-check HTTP response status for all links on this page">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
-              <span>Re-Check Links</span>
-            </button>
-          </div>
-
-          <!-- Filter Navigation Tabs -->
-          <div class="link-filter-nav">
-            <span class="link-filter-label">Filter:</span>
-            <div class="link-filter-tabs">
-              <button type="button" class="link-filter-btn active" data-link-filter="all">All (<span id="link-count-all">0</span>)</button>
-              <button type="button" class="link-filter-btn filter-btn-broken" data-link-filter="broken">Broken (<span id="link-count-broken">0</span>)</button>
-              <button type="button" class="link-filter-btn filter-btn-warning" data-link-filter="warning">Warnings (<span id="link-count-warning">0</span>)</button>
-              <button type="button" class="link-filter-btn filter-btn-working" data-link-filter="working">Working (<span id="link-count-working">0</span>)</button>
-            </div>
-          </div>
-
-          <!-- Link Results List -->
-          <div id="link-sequence-list" class="link-sequence-list">
-            <!-- Dynamically populated link cards -->
-          </div>
-        </div>
-      </section>
-
-      <!-- 3. Tab Order & Keyboard Navigation Drawer -->
-      <section class="tab-order-section" id="section-tabs">
-        <div class="tab-order-header" id="tab-order-header-toggle">
-          <div class="tab-order-header-title">
-            <span class="tab-order-icon">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-            </span>
-            <div>
-              <h3 class="tab-order-title">Tab Navigation Order & Focus Trail</h3>
-              <p class="tab-order-subtitle" title="Sequential keyboard tab order audit, visual reading flow & in-page trail overlay">Sequential keyboard tab order audit, visual reading flow & in-page trail overlay</p>
-            </div>
-          </div>
-          <div class="tab-order-badge-group">
-            <span id="tab-order-status-badge" class="tab-order-status-badge">-- Controls</span>
-            <button type="button" id="tab-order-toggle-btn" class="tab-order-toggle-btn">▼ View Sequence</button>
-          </div>
-        </div>
-
-        <div id="tab-order-panel-body" class="tab-order-panel-body hidden">
-          <div class="tab-order-summary-strip">
-            <div class="tab-order-strip-item">
-              <span class="tab-order-strip-label">Focusable Items:</span>
-              <strong id="tab-total-count" class="tab-val">0</strong>
-            </div>
-            <div class="tab-order-strip-item">
-              <span class="tab-order-strip-label">Tab Flow:</span>
-              <strong id="tab-flow-status" class="tab-status-val">Sequential</strong>
-            </div>
-            <div class="tab-order-strip-item">
-              <span class="tab-order-strip-label">Positive TabIndex:</span>
-              <strong id="tab-positive-count" class="tab-positive-val">0</strong>
-            </div>
-            <div class="tab-order-strip-item">
-              <span class="tab-order-strip-label">Skip Link:</span>
-              <strong id="tab-skip-status" class="tab-status-val">Verified</strong>
-            </div>
-          </div>
-
-          <!-- Action Bar -->
-          <div class="tab-order-actions-bar">
-            <button type="button" id="btn-toggle-tab-trail" class="btn-tab-trail">
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/></svg>
-              <span id="tab-trail-btn-label">🗺️ Show Tab-Trail Overlay</span>
-            </button>
-            <span class="tab-trail-hint">Overlays numbered badges (#1, #2, #3...) and connecting paths directly on the active webpage.</span>
-          </div>
-
-          <!-- Tab Sequence List -->
-          <div id="tab-sequence-list" class="tab-sequence-list">
-            <!-- Dynamically populated -->
-          </div>
-        </div>
-      </section>
-
-      <!-- 4. Screen Reader & VoiceOver Simulation Drawer -->
-      <section class="screen-reader-section" id="section-sr">
-        <div class="sr-header" id="sr-header-toggle">
-          <div class="sr-header-title">
-            <span class="sr-icon">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 18v-6a9 9 0 0 1 18 0v6"/><path d="M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3zM3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3z"/></svg>
-            </span>
-            <div>
-              <h3 class="sr-title">Screen Reader Speech & Rotor Simulation</h3>
-              <p class="sr-subtitle" title="VoiceOver / NVDA sequential readout simulation & auditory barrier analysis">VoiceOver / NVDA sequential readout simulation & auditory barrier analysis</p>
-            </div>
-          </div>
-          <div class="sr-badge-group">
-            <span id="sr-score-badge" class="sr-score-badge">--/100 VoiceOver</span>
-            <button type="button" id="sr-toggle-btn" class="sr-toggle-btn">▼ View Readout</button>
-          </div>
-        </div>
-        
-        <div id="sr-panel-body" class="sr-panel-body hidden">
-          <div class="sr-summary-strip">
-            <div class="sr-strip-item">
-              <span class="sr-strip-label">Screen Reader Barriers:</span>
-              <strong id="sr-barrier-count" class="sr-barrier-val">0</strong>
-            </div>
-            <div class="sr-strip-item">
-              <span class="sr-strip-label">Rotor Landmarks:</span>
-              <strong id="sr-landmark-status" class="sr-status-val">Verified</strong>
-            </div>
-            <div class="sr-strip-item">
-              <span class="sr-strip-label">Heading Hierarchy:</span>
-              <strong id="sr-heading-status" class="sr-status-val">Sequential</strong>
-            </div>
-          </div>
-
-          <!-- Persona Selector & Simulator Bar -->
-          <div class="sr-persona-bar">
-            <div class="sr-persona-group">
-              <span class="sr-persona-label">Emulate:</span>
-              <div class="sr-persona-tabs">
-                <button type="button" class="sr-persona-btn active" data-persona="ios-voiceover" title="Apple iOS VoiceOver syntax: [Name], [State], [Role], [Interaction Hint]">🍏 iOS VoiceOver</button>
-                <button type="button" class="sr-persona-btn" data-persona="android-talkback" title="Android TalkBack syntax: [Name], [Role], [State], [Hint] with capitalized roles and granularity">🤖 TalkBack</button>
-                <button type="button" class="sr-persona-btn" data-persona="nvda" title="NVDA syntax: [Role], [Name], [State] with virtual buffer browse mode">🖥️ NVDA</button>
-                <button type="button" class="sr-persona-btn" data-persona="narrator" title="Windows Narrator syntax: [Name], [Role], [State], [Scan Position]">🪟 Narrator</button>
-              </div>
-            </div>
-            <button type="button" id="btn-launch-page-sim" class="btn-launch-sim" title="Launch interactive screen reader cursor, sound cues & speech directly on the audited webpage">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-              <span>Launch On-Page Sim</span>
-            </button>
-          </div>
-
-          <!-- Interactive Emulation HUD & Syntax Formula Bar -->
-          <div class="sr-emulation-hud">
-            <div class="sr-hud-formula">
-              <span class="sr-formula-tag">Syntax Formula:</span>
-              <code id="sr-formula-text" class="sr-formula-code">[Name], [State], [Role], [Hint]</code>
-            </div>
-            <div class="sr-hud-gestures" id="sr-hud-gestures">
-              <button type="button" class="sr-gesture-btn" id="btn-emulate-prev" title="Emulate previous item navigation (Left Swipe / Left Arrow)">
-                <span>⬅</span> <span id="sr-label-prev">Swipe L</span>
-              </button>
-              <button type="button" class="sr-gesture-btn" id="btn-emulate-next" title="Emulate next item navigation (Right Swipe / Right Arrow)">
-                <span id="sr-label-next">Swipe R</span> <span>➔</span>
-              </button>
-              <button type="button" class="sr-gesture-btn sr-btn-activate" id="btn-emulate-activate" title="Emulate activation / tap on current element (Double-Tap / Enter)">
-                <span>👆</span> <span id="sr-label-activate">Double-Tap</span>
-              </button>
-              <button type="button" class="sr-gesture-btn sr-btn-rotor" id="btn-emulate-rotor" title="Emulate Rotor (iOS) or Granularity (Android) or Quick Nav Keys">
-                <span id="sr-icon-rotor">🔄</span> <span id="sr-label-rotor">Rotor Jump</span>
-              </button>
-              <button type="button" id="btn-toggle-compare" class="sr-compare-toggle-btn" title="Toggle side-by-side 4-reader announcement comparison for each element">
-                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
-                <span id="sr-compare-label">Compare All 4</span>
-              </button>
-            </div>
-          </div>
-
-          <!-- Speech Synthesis Audio Controls Bar -->
-          <div class="sr-audio-toolbar">
-            <div class="sr-audio-actions">
-              <button type="button" id="sr-btn-play" class="sr-ctrl-btn sr-btn-play" title="Read all sequence elements aloud step-by-step">
-                <span id="sr-play-icon"><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg></span> <span id="sr-play-label">Read All</span>
-              </button>
-              <button type="button" id="sr-btn-stop" class="sr-ctrl-btn sr-btn-stop" title="Stop speech playback" disabled>
-                <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>
-                <span>Stop</span>
-              </button>
-              <div class="sr-step-nav">
-                <button type="button" id="sr-btn-prev" class="sr-icon-btn" title="Previous speech item">
-                  <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><polygon points="19 20 9 12 19 4 19 20"/><line x1="5" y1="19" x2="5" y2="5" stroke="currentColor" stroke-width="2"/></svg>
-                </button>
-                <button type="button" id="sr-btn-next" class="sr-icon-btn" title="Next speech item">
-                  <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 4 15 12 5 20 5 4"/><line x1="19" y1="5" x2="19" y2="19" stroke="currentColor" stroke-width="2"/></svg>
-                </button>
-              </div>
-            </div>
-
-            <div class="sr-audio-settings">
-              <div class="sr-setting-group">
-                <label for="sr-rate-select" class="sr-ctrl-label">Speed:</label>
-                <select id="sr-rate-select" class="sr-select">
-                  <option value="1">1.0x</option>
-                  <option value="1.25" selected>1.25x</option>
-                  <option value="1.5">1.5x</option>
-                  <option value="2">2.0x</option>
-                </select>
-              </div>
-
-              <div class="sr-setting-group">
-                <label for="sr-voice-select" class="sr-ctrl-label">Voice:</label>
-                <select id="sr-voice-select" class="sr-select sr-voice-select">
-                  <option value="">Default System Voice</option>
-                </select>
-              </div>
-
-              <button type="button" id="sr-btn-earcons" class="sr-pill-btn active" title="Toggle synthesized auditory sound cues (earcons)">
-                <svg class="earcon-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>
-                <span class="earcon-label">Audio Cues</span>
-              </button>
-            </div>
-          </div>
-
-          <!-- Live Screen Reader Caption Pill -->
-          <div id="sr-caption-container" class="sr-caption-container">
-            <div class="sr-caption-header">
-              <span id="sr-caption-badge" class="sr-caption-badge">VOICEOVER CAPTION</span>
-              <span id="sr-caption-indicator" class="sr-caption-indicator hidden">● SPEAKING</span>
-            </div>
-            <div id="sr-caption-text" class="sr-caption-text">
-              Speech synthesizer ready. Click "Read All" or press "Speak" on any element below to test auditory readout.
-            </div>
-          </div>
-
-          <!-- Screen Reader Rotor Category Tabs -->
-          <div class="sr-rotor-nav">
-            <span class="sr-rotor-label">Rotor Filter:</span>
-            <div class="sr-rotor-tabs">
-              <button type="button" class="sr-rotor-btn active" data-rotor="all">All (<span id="rotor-count-all">0</span>)</button>
-              <button type="button" class="sr-rotor-btn" data-rotor="heading">Headings (<span id="rotor-count-heading">0</span>)</button>
-              <button type="button" class="sr-rotor-btn" data-rotor="landmark">Landmarks (<span id="rotor-count-landmark">0</span>)</button>
-              <button type="button" class="sr-rotor-btn" data-rotor="link">Links (<span id="rotor-count-link">0</span>)</button>
-              <button type="button" class="sr-rotor-btn" data-rotor="control">Controls (<span id="rotor-count-control">0</span>)</button>
-              <button type="button" class="sr-rotor-btn" data-rotor="text">Text (<span id="rotor-count-text">0</span>)</button>
-            </div>
-          </div>
-
-          <div id="speech-timeline" class="speech-timeline">
-            <!-- Dynamically populated speech steps -->
-          </div>
-        </div>
-      </section>
-
-    </main>
-
-  </div>
-
-  <!-- Client-side Scripts -->
-  <script src="../lib/axe.min.js"></script>
   <script src="../lib/jspdf.umd.min.js"></script>
   <script src="../lib/jspdf.plugin.autotable.js"></script>
   <script src="pdf-compiler.js"></script>
