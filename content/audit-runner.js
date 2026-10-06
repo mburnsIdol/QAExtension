@@ -834,11 +834,17 @@
 
     const overflowEls = [], textCands = [], interactive = [], sticky = [];
     const body = doc.body || de;
-    const stack = [[body, false, false, false]];
+    // [element, clipped by an ancestor, inside fixed/sticky, overflow already reported, visible clip box (viewport coords) or null]
+    const stack = [[body, false, false, false, null]];
+    const cut = (r, c) => {
+      if (!c) return r;
+      const left = Math.max(r.left, c.left), top = Math.max(r.top, c.top), right = Math.min(r.right, c.right), bottom = Math.min(r.bottom, c.bottom);
+      return { left, top, right, bottom, width: Math.max(0, right - left), height: Math.max(0, bottom - top) };
+    };
     let count = 0;
     let interactiveMatcher = (el) => { try { return el.matches(INTERACTIVE_SEL); } catch (e) { return false; } };
     while (stack.length && count < CAPS.walk) {
-      const [el, clipped, inFixed, reported] = stack.pop();
+      const [el, clipped, inFixed, reported, clip] = stack.pop();
       count++;
       if (el.nodeType !== 1 || SKIP_TAGS.has(el.localName) || hasExtToken(el)) continue;
       let cs;
@@ -858,9 +864,11 @@
         if (right > vw + 2 && r.left + sx < right) { overflowEls.push({ el, right: round(right, 0), scrollWidth: el.scrollWidth }); nowReported = true; }
       }
       if (boxVisible && !isFixed && !inFixed && el !== body && (hasDirectText(el) || REPLACED.test(el.localName)) && perceivable(el)) {
-        if (r.width >= 4 && r.height >= 4) {
-          const rects = cs.display === 'inline' ? Array.prototype.slice.call(el.getClientRects()).filter((x) => x.width > 0 && x.height > 0) : [r];
-          textCands.push({ el, r, rects });
+        // Only the part a scroll/overflow container actually shows can overlap anything.
+        const vr = cut(r, clip);
+        if (vr.width >= 4 && vr.height >= 4) {
+          const rects = (cs.display === 'inline' ? Array.prototype.slice.call(el.getClientRects()) : [r]).map((x) => cut(x, clip)).filter((x) => x.width > 0 && x.height > 0);
+          textCands.push({ el, r: vr, rects });
         }
       }
       const offscreen = r.right + sx <= 0 || r.bottom + sy <= 0; // e.g. skip links parked at left:-9999px
@@ -870,7 +878,12 @@
       if (el.localName === 'svg' || el.localName === 'select' || el.localName === 'iframe') continue;
       const clipsChildren = el !== body && el !== de && cs.overflowX !== 'visible' && cs.overflowX !== 'clip' ? true : (el !== body && cs.overflowX === 'clip');
       const kids = el.children;
-      for (let i = kids.length - 1; i >= 0; i--) stack.push([kids[i], clipped || clipsChildren, inFixed || isFixed, reported || nowReported]);
+      let kidClip = clip;
+      if (clipsChildren && !isFixed && cs.display !== 'inline' && cs.display !== 'contents') {
+        const pb = { left: r.left + el.clientLeft, top: r.top + el.clientTop, right: r.left + el.clientLeft + el.clientWidth, bottom: r.top + el.clientTop + el.clientHeight };
+        kidClip = cut(pb, clip);
+      }
+      for (let i = kids.length - 1; i >= 0; i--) stack.push([kids[i], clipped || clipsChildren, inFixed || isFixed, reported || nowReported, kidClip]);
     }
 
     // ---- Overlaps (sort-and-sweep, parent/child pairs excluded) ----
@@ -1115,11 +1128,15 @@
     ctx.axeIncomplete = (res.incomplete || []).filter(isWcagAxeResult).length;
     const axeViolations = (res.violations || []).filter(isWcagAxeResult);
     ctx.axeBypassFailed = axeViolations.some((v) => v.id === 'bypass');
+    ctx.axeFlagged = new Map(); // rule id -> Set(element): lets the tool's own rules skip defects axe already reported
     axeViolations.forEach((v) => {
       const nodes = [];
+      const flagged = new Set();
+      ctx.axeFlagged.set(v.id, flagged);
       (v.nodes || []).forEach((n) => {
-        if (nodes.length >= CAPS.nodesPerViolation) return;
         const el = n.element && n.element.nodeType === 1 ? n.element : null;
+        if (el) flagged.add(el);
+        if (nodes.length >= CAPS.nodesPerViolation) return;
         if (el && isExtensionElement(el)) return;
         const fallbackSel = Array.isArray(n.target) ? n.target.map((t) => (Array.isArray(t) ? t.join(' ') : t)).join(' ') : String(n.target || '');
         const selector = el ? ctx.sel(el) : fallbackSel;
@@ -1200,6 +1217,11 @@
       }
     }
     return null;
+  }
+
+  /** True when axe already reported this element under one of the given rules (avoid counting one defect twice). */
+  function axeHas(ctx, el, ids) {
+    return !!(ctx.axeFlagged && el && ids.some((id) => { const s = ctx.axeFlagged.get(id); return s && s.has(el); }));
   }
 
   function stageAria(ctx) {
@@ -1607,6 +1629,19 @@
     };
     const roleLabel = (role) => (role === 'link' ? 'Link' : role === 'button' ? 'Button' : ['textbox', 'searchbox', 'combobox', 'listbox', 'spinbutton', 'slider'].includes(role) ? 'Form field' : cap1(role));
     const visOf = (el) => { const v = vis.classify(el); return v.excluded ? { visibility: 'visible', reason: null, causeEl: null } : v; };
+    let reveals = null;
+    // A focusable control hidden at rest but revealed by a :focus rule (skip link) is not a hidden-content barrier.
+    const controlVis = (el) => {
+      const v = visOf(el);
+      if (v.visibility !== 'visible' && isStyledToggle(el)) {
+        // Custom radio/checkbox: the native input is visually hidden and its <label> is the visible control.
+        const lab = Array.prototype.find.call(el.labels, (l) => { const lv = vis.classify(l); return !lv.excluded && lv.visibility === 'visible'; });
+        if (lab) return { visibility: 'visible', reason: 'Styled control: the visible part is its label', causeEl: null };
+      }
+      if (v.visibility !== 'hidden-visual' || el.tabIndex < 0) return v;
+      if (!reveals) reveals = makeFocusRevealTest(doc, win);
+      return reveals(el) ? Object.assign({}, v, { visibility: 'sr-only', reason: 'Hidden until focused (revealed by a :focus style)' }) : v;
+    };
     const controlItem = (el, role, category, v) => {
       const nm = computeName(el, win, role);
       interactiveTotal++;
@@ -1672,8 +1707,8 @@
           visit(el);
           continue;
         }
-        if (role === 'link') { controlItem(el, role, 'link', visOf(el)); continue; }
-        if (CONTROL_ROLES.has(role)) { controlItem(el, role, 'control', visOf(el)); continue; }
+        if (role === 'link') { controlItem(el, role, 'link', controlVis(el)); continue; }
+        if (CONTROL_ROLES.has(role)) { controlItem(el, role, 'control', controlVis(el)); continue; }
         if (role === 'img') {
           imgTotal++;
           const name = computeName(el, win, 'img').name;
@@ -1691,8 +1726,10 @@
     };
     if (doc.body) visit(doc.body);
     // Visibility barrier (contract string takes precedence so the UI can match on it)
+    // An empty element is zero-size by nature: its problem is being empty (own barrier), not hidden content.
     raw.forEach((it) => {
-      if (it.vis.visibility === 'hidden-visual') { it.ownBarrier = it.barrier; it.barrier = SR_HIDDEN_BARRIER; }
+      if (it.vis.visibility === 'hidden-visual' && !it.name && /^Zero size/.test(it.vis.reason || '')) it.emptyZero = true;
+      else if (it.vis.visibility === 'hidden-visual') { it.ownBarrier = it.barrier; it.barrier = SR_HIDDEN_BARRIER; }
     });
     const items = includeHidden ? raw : raw.filter((it) => it.vis.visibility !== 'hidden-visual');
     const sequence = items.slice(0, CAPS.srSequence).map((it, index) => {
@@ -1716,56 +1753,233 @@
   const FOCUSABLE_SEL = 'a[href], area[href], button, input, select, textarea, summary, iframe, object, embed, audio[controls], video[controls], [tabindex], [contenteditable]:not([contenteditable="false"])';
   const SKIP_RE = /\b(skip|jump|bypass)\b|main content|go to content|to content/i;
 
-  function computeTabOrderInternal(doc, win, sel, vis) {
-    vis = vis || makeVisCtx(doc, win);
-    const reveals = makeFocusRevealTest(doc, win);
-    const nodes = doc.querySelectorAll(FOCUSABLE_SEL);
-    let stops = [];
-    for (let i = 0; i < nodes.length; i++) {
-      const el = nodes[i];
-      if (el.tabIndex < 0) continue;
-      if (el.disabled === true) continue;
-      try { if (el.matches(':disabled')) continue; } catch (e) { /* ignore */ }
-      if (el.localName === 'input' && (el.getAttribute('type') || '').toLowerCase() === 'hidden') continue;
-      if (el.localName === 'summary' && !(el.parentElement && el.parentElement.localName === 'details' && el.parentElement.querySelector(':scope > summary') === el)) continue;
-      const v = vis.classify(el);
-      if (v.excluded) continue;
-      if (v.visibility === 'sr-only') {
-        // Focusable visually-hidden element: fine if a :focus rule reveals it (skip-link pattern), otherwise focus is invisible.
-        if (reveals(el)) v.reason = 'Visually hidden until focused (revealed by a :focus style)';
-        else { v.visibility = 'hidden-visual'; v.reason = 'Visually hidden (sr-only pattern) and not revealed on focus'; }
-      }
-      const a = el.getAttribute('tabindex');
-      const attr = a !== null && /^\s*-?\d+\s*$/.test(a) ? parseInt(a, 10) : null;
-      stops.push({ el, dom: i, ti: el.tabIndex, attr, v });
+  const TAB_SKIP_TAGS = /^(script|style|template|noscript|head|title|meta|link|base)$/;
+  const MULTIPART_INPUT = /^(date|time|datetime-local|month|week)$/;
+  // Composite widgets expect ONE Tab stop with arrow keys between items (WAI-ARIA APG roving tabindex).
+  const COMPOSITE_ITEM = { radio: 1, tab: 1, option: 1, menuitem: 1, menuitemcheckbox: 1, menuitemradio: 1, treeitem: 1 };
+  const COMPOSITE_SEL = '[role="radiogroup"], [role="tablist"], [role="listbox"], [role="menu"], [role="menubar"], [role="tree"], [role="treegrid"], [role="grid"]';
+
+  /** Open shadow root, or a closed one when running as an extension content script. UA shadow roots are never returned. */
+  function shadowRootOf(el) {
+    if (el.shadowRoot) return el.shadowRoot;
+    try {
+      const c = typeof chrome !== 'undefined' ? chrome : null; // eslint-disable-line no-undef
+      if (c && c.dom && typeof c.dom.openOrClosedShadowRoot === 'function') return c.dom.openOrClosedShadowRoot(el) || null;
+    } catch (e) { /* not an element with a shadow root */ }
+    return null;
+  }
+  const isRadio = (el) => el.localName === 'input' && (el.type || '').toLowerCase() === 'radio';
+  const isStyledToggle = (el) => el.localName === 'input' && /^(radio|checkbox)$/i.test(el.type || '') && el.labels && el.labels.length > 0;
+
+  /** tabindex the element itself takes in sequential navigation, or null when it is not a Tab stop on its own. */
+  function ownTabIndex(el) {
+    if (el.disabled === true) return null;
+    try { if (el.matches(':disabled')) return null; } catch (e) { /* ignore */ }
+    const tag = el.localName;
+    if (tag === 'input' && (el.getAttribute('type') || '').toLowerCase() === 'hidden') return null;
+    if (tag === 'summary' && !(el.parentElement && el.parentElement.localName === 'details' && el.parentElement.querySelector(':scope > summary') === el)) return null;
+    const sr = el.shadowRoot;
+    if (sr && sr.delegatesFocus) return null; // focus goes straight to the first stop inside
+    let native = false;
+    try { native = el.matches(FOCUSABLE_SEL); } catch (e) { /* ignore */ }
+    if (native && el.tabIndex >= 0) return el.tabIndex;
+    if (el.hasAttribute('tabindex')) return null;
+    // Editing host: Chrome reports tabIndex -1 but Tab still stops on it. Nested editable content is part of its host.
+    if (el.isContentEditable) {
+      const p = el.parentElement || (el.parentNode && el.parentNode.host);
+      return p && p.isContentEditable ? null : 0;
     }
-    // Radio groups contribute only the checked radio, or the first one if none is checked.
+    return null;
+  }
+
+  /*
+   * Sequential focus navigation as Chromium performs it. Every rule below is verified against real Tab presses
+   * (tabtrail-tests/run.js):
+   *  - Flat tree: an open shadow root, a slot and a same-origin iframe are nested focus scopes placed at their owner;
+   *    tabindex > 0 sorts first only within its own scope.
+   *  - A shadow host with tabindex="-1" removes its whole shadow tree (slotted content included) from the order.
+   *  - A delegatesFocus host is not a stop itself; an iframe with nothing focusable inside is a stop itself.
+   *  - Editing hosts (contenteditable) and scroll containers with no keyboard-focusable content are stops.
+   *  - A native radio group (same tree, form owner and name) is ONE stop: its checked radio when that radio can take
+   *    focus, otherwise its first radio in tab order. Arrow keys move within the group.
+   */
+  function collectTabStops(doc, win, vis) {
+    let walked = 0;
+    const scrollable = /^(auto|scroll|overlay)$/;
+    const reveal = new Map();
+    const classifyStop = (el, cx) => {
+      let target = el;
+      if (el.localName === 'area') {
+        // An <area> has no box of its own: it is drawn (and focusable) only through an <img usemap>.
+        const map = el.closest('map');
+        const name = map && (map.getAttribute('name') || map.id);
+        target = name ? Array.prototype.find.call(cx.doc.images, (im) => (im.getAttribute('usemap') || '') === '#' + name) : null;
+        if (!target) return { excluded: 'Image map not used by any image' };
+      }
+      let v = cx.vis.classify(target);
+      if (v.excluded) return v;
+      if (v.visibility !== 'visible' && isStyledToggle(el)) {
+        // Custom radio/checkbox: the native input is visually hidden and its <label> is the visible control.
+        const lab = Array.prototype.find.call(el.labels, (l) => { const lv = cx.vis.classify(l); return !lv.excluded && lv.visibility === 'visible'; });
+        if (lab) {
+          return Object.assign(cx.vis.classify(lab), { ariaHidden: v.ariaHidden, ariaHiddenEl: v.ariaHiddenEl, boxEl: lab,
+            reason: 'Styled control: the native input is visually hidden, so check its label shows a focus indicator' });
+        }
+      }
+      if (v.visibility === 'sr-only' || v.visibility === 'hidden-visual') {
+        // Focusable but hidden at rest: fine if a :focus rule reveals it (skip links parked off-screen or clipped),
+        // otherwise keyboard focus lands on something invisible.
+        if (!reveal.has(cx.doc)) reveal.set(cx.doc, makeFocusRevealTest(cx.doc, cx.win));
+        if (reveal.get(cx.doc)(el)) { v.visibility = 'sr-only'; v.reason = 'Hidden until focused (revealed by a :focus style)'; }
+        else if (v.visibility === 'sr-only') { v.visibility = 'hidden-visual'; v.reason = 'Visually hidden (sr-only pattern) and not revealed on focus'; }
+      }
+      v.boxEl = target;
+      return v;
+    };
+    const isScroller = (el, cx, cs) => {
+      if (!cs || el === cx.doc.documentElement || el === cx.doc.body || el === cx.doc.scrollingElement) return false;
+      return (scrollable.test(cs.overflowY) && el.scrollHeight > el.clientHeight) || (scrollable.test(cs.overflowX) && el.scrollWidth > el.clientWidth);
+    };
+    // -> true when el or anything after it in its flat subtree is keyboard focusable (decides scroll-container stops)
+    const visit = (el, scope, cx) => {
+      if (walked++ > CAPS.walk) return false;
+      if (TAB_SKIP_TAGS.test(el.localName)) return false;
+      // UA style is area { display: none }: an <area> is rendered through its <map>/<img>, so judge it by its map.
+      const g = cx.vis.get(el.localName === 'area' ? (el.closest('map') || el) : el);
+      if (g.excluded) return false;
+      const sr = shadowRootOf(el);
+      const hasAttr = el.hasAttribute('tabindex');
+      if (sr && hasAttr && el.tabIndex < 0) return false;
+      let ti = ownTabIndex(el), v = null;
+      if (ti != null) { v = classifyStop(el, cx); if (v.excluded) ti = null; }
+      const e = { el, v, ti, order: ti != null ? ti : (hasAttr ? el.tabIndex : 0), stop: ti != null, kids: null, cx };
+      scope.push(e);
+      let has = e.stop;
+      const each = (list, into) => { for (let i = 0; i < list.length; i++) if (visit(list[i], into, cx)) has = true; };
+      if (sr) { e.kids = []; each(sr.children, e.kids); }
+      else if (el.localName === 'slot' && el.getRootNode() !== cx.doc) {
+        e.kids = [];
+        const assigned = typeof el.assignedElements === 'function' ? el.assignedElements() : [];
+        each(assigned.length ? assigned : el.children, e.kids);
+      } else if (e.stop && (el.localName === 'iframe' || el.localName === 'frame')) {
+        let fd = null;
+        try { fd = el.contentDocument; } catch (err) { fd = null; }
+        if (!fd) e.crossOrigin = true;
+        else if (fd.documentElement && cx.depth < 4) {
+          const fw = fd.defaultView, fr = el.getBoundingClientRect();
+          let pl = 0, pt = 0;
+          try { const fcs = g.cs || win.getComputedStyle(el); pl = parseFloat(fcs.paddingLeft) || 0; pt = parseFloat(fcs.paddingTop) || 0; } catch (err) { /* ignore */ }
+          const inner = { doc: fd, win: fw, vis: makeVisCtx(fd, fw), depth: cx.depth + 1,
+            off: { x: cx.off.x + fr.left + el.clientLeft + pl, y: cx.off.y + fr.top + el.clientTop + pt } };
+          const kids = [];
+          let any = false;
+          for (let c = fd.documentElement.firstElementChild; c; c = c.nextElementSibling) if (visit(c, kids, inner)) any = true;
+          // Tab moves through the frame's own stops; the frame element is a stop only when it has none.
+          if (any) { e.stop = false; e.kids = kids; }
+        }
+      } else each(el.children, scope);
+      if (!e.stop && !has && !hasAttr && isScroller(el, cx, g.cs)) {
+        v = classifyStop(el, cx);
+        if (!v.excluded) { e.v = v; e.ti = 0; e.order = 0; e.stop = true; e.scroller = true; has = true; }
+      }
+      return has;
+    };
+    const flatten = (scope, out) => {
+      const pos = scope.filter((e) => e.order > 0).sort((a, b) => a.order - b.order);
+      pos.concat(scope.filter((e) => e.order === 0)).forEach((e) => { if (e.stop) out.push(e); if (e.kids) flatten(e.kids, out); });
+      return out;
+    };
+    const top = [];
+    const cx0 = { doc, win, vis, depth: 0, off: { x: 0, y: 0 } };
+    for (let c = doc.documentElement.firstElementChild; c; c = c.nextElementSibling) visit(c, top, cx0);
+    let stops = flatten(top, []);
+
+    // Native radio groups -> one stop each.
+    const ids = new WeakMap();
+    let nid = 0;
+    const idOf = (o) => { if (!o) return 0; if (!ids.has(o)) ids.set(o, ++nid); return ids.get(o); };
+    const groupKey = (el) => idOf(el.getRootNode()) + '|' + idOf(el.form) + '|' + el.name;
     const groups = new Map();
     stops.forEach((s) => {
-      if (s.el.localName !== 'input' || (s.el.type || '').toLowerCase() !== 'radio' || !s.el.name) return;
-      const key = (s.el.form ? 'f' + Array.prototype.indexOf.call(doc.forms, s.el.form) : 'd') + '|' + s.el.name;
-      if (!groups.has(key)) groups.set(key, []);
-      groups.get(key).push(s);
+      if (!isRadio(s.el) || !s.el.name) return;
+      const k = groupKey(s.el);
+      if (!groups.has(k)) groups.set(k, []);
+      groups.get(k).push(s);
     });
     if (groups.size) {
       const drop = new Set();
-      groups.forEach((members) => {
+      groups.forEach((members, k) => {
         const keep = members.find((m) => m.el.checked) || members[0];
         members.forEach((m) => { if (m !== keep) drop.add(m); });
+        // Options the arrow keys can reach: every enabled, rendered radio of the group (tabindex="-1" ones included).
+        const root = keep.el.getRootNode();
+        keep.radioGroup = Array.prototype.filter.call(root.querySelectorAll('input[type="radio" i]'), (r) =>
+          r.name === keep.el.name && groupKey(r) === k && !r.disabled && !keep.cx.vis.get(r).excluded && !keep.cx.vis.classify(r).excluded);
       });
       stops = stops.filter((s) => !drop.has(s));
     }
-    const positive = stops.filter((s) => s.ti > 0).sort((a, b) => a.ti - b.ti || a.dom - b.dom);
-    const ordered = positive.concat(stops.filter((s) => s.ti === 0));
+    return stops;
+  }
+
+  function computeTabOrderInternal(doc, win, sel, vis) {
+    vis = vis || makeVisCtx(doc, win);
+    const ordered = collectTabStops(doc, win, vis);
+    const positive = ordered.filter((s) => s.ti > 0);
+    // Selectors that reach into shadow roots and same-origin frames: "outer >>> inner" (resolved by the overlay's qs()).
+    const gens = new Map([[doc, sel]]);
+    const scopedPath = (el, root) => {
+      const id = el.getAttribute('id');
+      if (id) { try { const s = '#' + CSS.escape(id); if (root.querySelector(s) === el) return s; } catch (e) { /* ignore */ } }
+      const idx = [];
+      for (let c = el; c && c.parentNode; c = c.parentNode) { idx.unshift(Array.prototype.indexOf.call(c.parentNode.children, c)); if (c.parentNode === root) break; }
+      return '@' + idx.join('.');
+    };
+    const deepSel = (el) => {
+      const root = el.getRootNode();
+      if (root && root.host) return deepSel(root.host) + ' >>> ' + scopedPath(el, root);
+      const d = el.ownerDocument;
+      const fe = d !== doc && d.defaultView ? d.defaultView.frameElement : null;
+      if (fe) { if (!gens.has(d)) gens.set(d, makeSelectorGen(d)); return deepSel(fe) + ' >>> ' + gens.get(d)(el); }
+      return sel(el);
+    };
     const sx = win.scrollX, sy = win.scrollY;
     ordered.forEach((s) => {
-      const r = s.el.getBoundingClientRect();
-      s.rect = { x: Math.round(r.left + sx), y: Math.round(r.top + sy), width: Math.round(r.width), height: Math.round(r.height) };
+      const r = (s.v.boxEl || s.el).getBoundingClientRect();
+      s.rect = { x: Math.round(r.left + s.cx.off.x + sx), y: Math.round(r.top + s.cx.off.y + sy), width: Math.round(r.width), height: Math.round(r.height) };
+      s.attr = (() => { const a = s.el.getAttribute('tabindex'); return a !== null && /^\s*-?\d+\s*$/.test(a) ? parseInt(a, 10) : null; })();
       s.anomaly = false; s.warning = null;
       if (s.v.visibility === 'hidden-visual') { s.anomaly = true; s.warning = HIDDEN_FOCUS_WARNING; }
       else if (s.v.ariaHidden) { s.anomaly = true; s.warning = ARIA_HIDDEN_WARNING; }
+      // What happens at this stop beyond a single Tab press (shown on the trail and in the panel).
+      const el = s.el, tag = el.localName;
+      const n = s.radioGroup ? s.radioGroup.length : 0;
+      if (n > 1) { s.keyTag = '↕ ' + n + ' options'; s.keys = 'Radio group: Tab enters once, arrow keys move between the ' + n + ' options, Tab leaves the group'; }
+      else if (s.scroller) { s.keyTag = '↕ scroll'; s.keys = 'Scrollable area with nothing focusable inside: Chrome makes it a Tab stop so arrow keys can scroll it'; }
+      else if (tag === 'input' && MULTIPART_INPUT.test((el.type || '').toLowerCase())) { s.keyTag = '⇥ parts'; s.keys = 'Tab steps through each part of this field (e.g. day, month, year) before moving on'; }
+      else if (s.crossOrigin) { s.keyTag = '⇥ frame'; s.keys = 'Tab continues through this embedded frame\'s own stops (cross-origin, so they cannot be listed here)'; }
+      else if ((tag === 'audio' || tag === 'video') && el.hasAttribute('controls')) { s.keyTag = '⇥ controls'; s.keys = 'Tab moves through the player\'s built-in controls before moving on'; }
     });
     const anomalies = [];
+    // Patterns that turn one logical control into several Tab stops.
+    const flagGroups = (pick, type, warning, message) => {
+      const by = new Map();
+      ordered.forEach((s, i) => { const k = pick(s); if (!k) return; if (!by.has(k)) by.set(k, []); by.get(k).push(i); });
+      by.forEach((idx) => {
+        if (idx.length < 2) return;
+        idx.forEach((i) => { const s = ordered[i]; s.anomaly = true; if (!s.warning) s.warning = warning; });
+        anomalies.push({ fromIndex: idx[0], toIndex: idx[1], type, message: message(idx.length) });
+      });
+    };
+    flagGroups((s) => {
+      if (!COMPOSITE_ITEM[getRole(s.el)]) return null;
+      return s.el.closest(COMPOSITE_SEL);
+    }, 'composite-tab-stops', 'Separate Tab stop inside a composite widget',
+    (n) => n + ' items of one ARIA widget are separate Tab stops; expected one stop with arrow keys between items (roving tabindex)');
+    flagGroups((s) => {
+      if (!isRadio(s.el) || s.el.name) return null;
+      return s.el.closest('fieldset, [role="radiogroup"], [role="group"]') || (s.el.closest('label') || s.el).parentElement;
+    }, 'ungrouped-radios', 'Radio button has no name, so it is not grouped',
+    (n) => n + ' radio buttons without a name attribute: each is a separate Tab stop and arrow keys do not move between them');
     const leap = Math.max(150, Math.round(0.25 * (win.innerHeight || 800)));
     let upward = 0, backward = 0;
     // tabindex > 0 on its own is best practice (axe 'tabindex'). It is logged only when it fails WCAG 2.4.3
@@ -1792,7 +2006,7 @@
       const ov = Math.min(a.rect.y + a.rect.height, b.rect.y + b.rect.height) - Math.max(a.rect.y, b.rect.y);
       const sameRow = ov > 0.5 * Math.min(a.rect.height || 1, b.rect.height || 1);
       let rtl = false;
-      try { rtl = vis.get(b.el).cs.direction === 'rtl'; } catch (e) { /* ignore */ }
+      try { rtl = b.cx.vis.get(b.el).cs.direction === 'rtl'; } catch (e) { /* ignore */ }
       const dx = rtl ? a.rect.x - b.rect.x : b.rect.x - a.rect.x;
       if (sameRow && dx < -40) {
         backward++;
@@ -1827,9 +2041,11 @@
       status, total: ordered.length, positiveTabindexCount: positive.length, skipLink: skip,
       anomalies: anomalies.slice(0, 200),
       sequence: ordered.slice(0, CAPS.tabSequence).map((s, index) => ({
-        index, selector: sel(s.el), role: getRole(s.el) || s.el.localName, name: computeName(s.el, win).name,
+        index, selector: deepSel(s.el), role: getRole(s.el) || (s.scroller ? 'scrollable region' : s.el.localName), name: computeName(s.el, s.cx.win).name,
         tabindex: s.attr, rect: s.rect, isAnomaly: s.anomaly, warning: s.warning,
-        visibility: s.v.visibility, visibilityReason: s.v.reason || null
+        visibility: s.v.visibility, visibilityReason: s.v.reason || null,
+        keys: s.keys || null, keyTag: s.keyTag || null, box: s.v.boxEl && s.v.boxEl !== s.el ? deepSel(s.v.boxEl) : null,
+        group: s.radioGroup && s.radioGroup.length > 1 ? { name: s.el.name, size: s.radioGroup.length, members: s.radioGroup.slice(0, 50).map(deepSel) } : null
       }))
     };
     return { result, ordered, positive: positive.filter((p) => f44.has(p)), upward, backward };
@@ -1899,7 +2115,7 @@
     // af-hidden-announced: non-focusable content read by AT but not visible, grouped per hiding container.
     const groups = new Map();
     sp.raw.forEach((it) => {
-      if (it.vis.visibility !== 'hidden-visual') return;
+      if (it.vis.visibility !== 'hidden-visual' || it.emptyZero) return;
       const focusable = it.el.tabIndex >= 0 && !it.el.disabled && (it.category === 'link' || it.category === 'control' || it.el.hasAttribute('tabindex'));
       if (focusable) return; // reported as af-hidden-focusable by the tab stage
       const key = it.vis.causeEl || it.el;
@@ -1950,7 +2166,7 @@
         nodes: inacc.map((el) => makeNode(ctx, el, 'role="' + (el.getAttribute('role') || 'none') + '" with no tabindex; keyboard users cannot reach it.',
           { html: startTagWith(el, 'tabindex', '0'), note: 'Prefer a native <button>/<a href>; otherwise add tabindex="0" and Enter/Space key handlers.' })) }));
     }
-    const hidden = ordered.filter((s) => s.v.visibility === 'hidden-visual' || s.v.ariaHidden);
+    const hidden = ordered.filter((s) => s.v.visibility === 'hidden-visual' || (s.v.ariaHidden && !axeHas(ctx, s.v.ariaHiddenEl, ['aria-hidden-focus'])));
     if (hidden.length) {
       ctx.violations.push(makeViolation({ id: 'af-hidden-focusable', source: 'tab', impact: 'serious', title: 'Keyboard focus lands on content that is not visible',
         description: 'These elements receive keyboard focus while hidden from view (collapsed, transparent, off-screen or clipped) or while inside aria-hidden="true".',
@@ -2066,7 +2282,7 @@
         }
         iss.forEach((x) => {
           if (out.issues.length < CAPS.links) out.issues.push({ selector, href: trunc(href, 500), text: trunc(text, 200), type: x.type, severity: x.severity, message: x.message });
-          (byType[x.type] = byType[x.type] || []).push({ el, x, text });
+          if (!(x.type === 'no-text' && axeHas(ctx, el, ['link-name', 'area-alt']))) (byType[x.type] = byType[x.type] || []).push({ el, x, text });
         });
       }
     }
@@ -2095,7 +2311,7 @@
     const a = res.analysis;
     const devices = estimateDevices(doc, win, ctx.sel, a);
     ctx.mobile = Object.assign({}, a, { devices });
-    const aa = res.failEls.filter((f) => f.level === 'AA');
+    const aa = res.failEls.filter((f) => f.level === 'AA' && !axeHas(ctx, f.el, ['target-size']));
     if (aa.length) {
       ctx.violations.push(makeViolation({ id: 'af-target-size', source: 'mobile', impact: 'moderate', title: 'Touch target smaller than 24×24px (WCAG 2.5.8)',
         description: 'Interactive targets must be at least 24 by 24 CSS pixels.', wcag: ['2.5.8'], tags: ['wcag22aa', 'af-mobile'],
@@ -2103,7 +2319,7 @@
           { css: ctx.sel(f.el) + ' { min-width: 24px; min-height: 24px; }' })) }));
     }
     const vm = a.viewportMeta;
-    if (res.metaEl && (vm.userScalableNo || vm.maxScaleRestricted)) {
+    if (res.metaEl && (vm.userScalableNo || vm.maxScaleRestricted) && !axeHas(ctx, res.metaEl, ['meta-viewport'])) {
       const parts = [];
       if (vm.userScalableNo) parts.push('user-scalable=no');
       if (vm.maxScaleRestricted) parts.push((/maximum-scale\s*=\s*[^,;]*/i.exec(vm.content || '') || ['maximum-scale'])[0].replace(/\s/g, ''));
@@ -2327,9 +2543,62 @@
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const nextFrame = () => new Promise((r) => { try { W.requestAnimationFrame(() => r()); } catch (e) { setTimeout(r, 16); } });
 
+  function innerRoot(el) {
+    if (el.shadowRoot) return el.shadowRoot;
+    try {
+      const c = typeof chrome !== 'undefined' ? chrome : null; // eslint-disable-line no-undef
+      if (c && c.dom && typeof c.dom.openOrClosedShadowRoot === 'function') return c.dom.openOrClosedShadowRoot(el) || null;
+    } catch (e) { /* no shadow root */ }
+    return null;
+  }
+  // "outer >>> inner" steps into a shadow root or a same-origin frame; "@1.0.2" is a child-index path from that root.
   function qs(sel, root) {
     if (!sel || typeof sel !== 'string') return null;
-    try { return (root || D).querySelector(sel); } catch (e) { return null; }
+    try {
+      const parts = sel.split(' >>> ');
+      let el = (root || D).querySelector(parts[0]);
+      for (let i = 1; i < parts.length && el; i++) {
+        const scope = /^i?frame$/.test(el.localName) ? el.contentDocument : innerRoot(el);
+        if (!scope) return null;
+        const p = parts[i];
+        el = p[0] === '@' ? p.slice(1).split('.').reduce((n, k) => (n && n.children[+k]) || null, scope) : scope.querySelector(p);
+      }
+      return el || null;
+    } catch (e) { return null; }
+  }
+  /** Bounding box in the top document's viewport: adds same-origin frame offsets; an <area> is drawn by its <img usemap>. */
+  function viewRect(el) {
+    let box = el;
+    if (el.localName === 'area') {
+      const map = el.closest('map'), name = map && (map.getAttribute('name') || map.id);
+      const img = name && Array.prototype.find.call(el.ownerDocument.images, (im) => (im.getAttribute('usemap') || '') === '#' + name);
+      if (img) box = img;
+    }
+    const r = box.getBoundingClientRect();
+    let x = r.left, y = r.top;
+    try {
+      for (let w = el.ownerDocument.defaultView; w && w !== W && w.frameElement; w = w.parent) {
+        const fe = w.frameElement, fr = fe.getBoundingClientRect(), cs = fe.ownerDocument.defaultView.getComputedStyle(fe);
+        x += fr.left + fe.clientLeft + (parseFloat(cs.paddingLeft) || 0);
+        y += fr.top + fe.clientTop + (parseFloat(cs.paddingTop) || 0);
+      }
+    } catch (e) { /* cross-origin parent: keep frame-local box */ }
+    return { left: x, top: y, width: r.width, height: r.height, right: x + r.width, bottom: y + r.height };
+  }
+  /** The focused element itself, looking through shadow roots and same-origin frames. */
+  function deepActive() {
+    let a = D.activeElement;
+    for (let i = 0; i < 20 && a; i++) {
+      let next = null;
+      const sr = innerRoot(a);
+      if (sr && sr.activeElement) next = sr.activeElement;
+      else if (/^i?frame$/.test(a.localName)) {
+        try { const d = a.contentDocument; if (d && d.activeElement && d.activeElement !== d.body) next = d.activeElement; } catch (e) { /* cross-origin */ }
+      }
+      if (!next) break;
+      a = next;
+    }
+    return a;
   }
 
   // Fire-and-forget message to the popup; silently ignored when the popup is closed or runtime is absent.
@@ -2345,7 +2614,7 @@
   function notify(overlay) { sendMsg({ type: 'AF_OVERLAY_CLOSED', overlay }); }
 
   /* Live DOM watching (CONTRACT §10.3). Mutations caused by our own nodes are ignored. */
-  const WATCH_ATTRS = ['class', 'style', 'hidden', 'disabled', 'tabindex', 'aria-hidden', 'aria-expanded', 'open', 'inert'];
+  const WATCH_ATTRS = ['class', 'style', 'hidden', 'disabled', 'tabindex', 'aria-hidden', 'aria-expanded', 'open', 'inert', 'checked', 'name', 'type', 'href', 'role', 'contenteditable'];
   function isOwnNode(n) {
     try {
       let el = n && n.nodeType === 1 ? n : (n && n.parentNode);
@@ -2607,7 +2876,7 @@
   function positionHighlight() {
     if (!HL.el || !HL.ring) return;
     if (!HL.el.isConnected) { HL.ring.classList.add('__af_hl_hidden'); return; }
-    const r = HL.el.getBoundingClientRect();
+    const r = viewRect(HL.el);
     const pad = 5;
     const w = Math.max(r.width, 10) + pad * 2, hgt = Math.max(r.height, 10) + pad * 2;
     const x = r.left - pad - (r.width < 10 ? (10 - r.width) / 2 : 0);
@@ -2709,7 +2978,7 @@
   /* §5.5 Tab-Trail (+ CONTRACT §10.3: line style, live, real tabbing)  */
   /* ================================================================== */
   const TT = { svg: null, bar: null, seq: [], bucket: [], timer: 0, drawn: 0, stats: null, statEl: null, focusEl: null,
-    lineStyle: 'straight', live: true, watch: null, sig: '', geoSig: '', pts: [], focusIdx: -1, toggles: null, liveEl: null, open: false };
+    lineStyle: 'straight', live: true, watch: null, sig: '', geoSig: '', pts: [], focusIdx: -1, toggles: null, liveEl: null, open: false, frames: null };
   const TT_COLORS = { seq: PAL.cyan, up: '#FF3B30', back: PAL.amber };
 
   const stopSig = (seq) => (seq || []).map((s) => (s && s.selector) + '|' + ((s && s.visibility) || '') + '|' + ((s && s.tabindex) == null ? '' : s.tabindex)).join('\n');
@@ -2727,8 +2996,8 @@
       'pointer-events:none !important;z-index:2147483646 !important;overflow:visible !important;display:block !important;background:transparent !important;max-width:none !important;max-height:none !important;');
     (D.body || D.documentElement).appendChild(s);
     TT.svg = s; TT.open = true;
-    TT.focusIdx = indexOfStop(D.activeElement);
-    TT.focusEl = TT.focusIdx >= 0 ? D.activeElement : null;
+    TT.focusIdx = indexOfStop(deepActive());
+    TT.focusEl = TT.focusIdx >= 0 ? deepActive() : null;
     drawTabTrail();
     buildTabTrailBar();
     const schedule = () => { if (TT.timer) return; TT.timer = setTimeout(() => { TT.timer = 0; try { drawTabTrail(); } catch (e) {} }, 140); };
@@ -2736,6 +3005,8 @@
     listen(TT.bucket, W, 'scroll', schedule, { passive: true, capture: true });
     listen(TT.bucket, D, 'focusin', onTrailFocusIn, true);
     listen(TT.bucket, D, 'focusout', onTrailFocusOut, true);
+    TT.frames = new WeakSet();
+    hookTrailFrames();
     if (TT.live) {
       TT.watch = makeLiveWatcher(liveRefreshTrail);
       // The popup's sequence may be stale (page changed since the audit): reconcile right away.
@@ -2764,7 +3035,8 @@
         if (sig !== TT.sig) {
           TT.sig = sig;
           TT.seq = to.sequence.slice(0, 500);
-          TT.focusIdx = indexOfStop(TT.focusEl || D.activeElement);
+          TT.focusIdx = indexOfStop(TT.focusEl || deepActive());
+          hookTrailFrames();
           drawTabTrail();
           let clean = null; try { clean = JSON.parse(JSON.stringify(to)); } catch (e) {}
           if (clean) sendMsg({ type: 'AF_TAB_ORDER_UPDATED', tabOrder: clean });
@@ -2780,15 +3052,32 @@
     return TT.seq.map((s) => { const b = resolveStop(s); return b ? Math.round(b.x) + ',' + Math.round(b.y) + ',' + Math.round(b.w) + ',' + Math.round(b.h) : '-'; }).join(';');
   }
 
+  // A radio group is one stop: arrowing to another option keeps "You are here" on that stop.
   function indexOfStop(el) {
     if (!el || el === D.body || el === D.documentElement) return -1;
-    for (let i = 0; i < TT.seq.length; i++) { if (qs(TT.seq[i] && TT.seq[i].selector) === el) return i; }
+    for (let i = 0; i < TT.seq.length; i++) {
+      const s = TT.seq[i];
+      if (!s) continue;
+      if (qs(s.selector) === el) return i;
+      if (s.group && Array.isArray(s.group.members) && s.group.members.some((m) => qs(m) === el)) return i;
+    }
     return -1;
+  }
+
+  // Focus events inside same-origin frames never reach this document: listen in each frame too.
+  function hookTrailFrames() {
+    D.querySelectorAll('iframe, frame').forEach((f) => {
+      let fd = null;
+      try { fd = f.contentDocument; } catch (e) { fd = null; }
+      if (!fd || TT.frames.has(fd)) return;
+      TT.frames.add(fd);
+      listen(TT.bucket, fd, 'focusin', onTrailFocusIn, true);
+    });
   }
 
   function onTrailFocusIn(e) {
     if (eventInOwnUi(e)) return; // our own bar buttons
-    const el = e.target;
+    const el = deepActive(); // e.target is retargeted to the shadow host / frame
     const idx = indexOfStop(el);
     TT.focusEl = idx >= 0 ? el : null;
     if (idx === TT.focusIdx && idx >= 0) return;
@@ -2822,7 +3111,8 @@
       const el = qs(TT.seq[i].selector);
       if (!el) continue;
       try { el.focus({ focusVisible: true }); } catch (e) { try { el.focus(); } catch (e2) {} }
-      if (D.activeElement === el || (el.contains && el.contains(D.activeElement))) {
+      const act = deepActive();
+      if (act === el || (el.contains && el.contains(act))) {
         // focusin normally updates state; enforce in case the page stopped propagation.
         if (TT.focusIdx !== i) { TT.focusIdx = i; TT.focusEl = el; drawHereRing(); updateFocusLabel(); sendMsg({ type: 'AF_TAB_FOCUS_CHANGED', index: i, selector: TT.seq[i].selector || null }); }
         setTrailStatus('');
@@ -2833,9 +3123,9 @@
   }
 
   function resolveStop(stop) {
-    const el = qs(stop && stop.selector);
+    const el = qs(stop && (stop.box || stop.selector)); // box: the visible stand-in (label of a styled radio, img of an area)
     if (el && el.isConnected) {
-      const r = el.getBoundingClientRect();
+      const r = viewRect(el);
       if (r.width > 0 || r.height > 0 || r.left || r.top) return { x: r.left + W.scrollX, y: r.top + W.scrollY, w: r.width, h: r.height, live: true };
     }
     const rc = stop && stop.rect;
@@ -2945,12 +3235,36 @@
         gOutline.appendChild(svg('rect', { x: p.box.x - 2, y: p.box.y - 2, width: p.box.w + 4, height: p.box.h + 4, rx: 4,
           fill: 'none', stroke: col, 'stroke-width': 1.5, 'stroke-opacity': 0.75, 'stroke-dasharray': (p.box.live && !p.isHidden) ? null : '4 3' }));
       }
+      // The other options of a radio group: reached with arrow keys, not Tab.
+      if (stop.group && Array.isArray(stop.group.members)) {
+        const self = qs(stop.selector);
+        stop.group.members.forEach((m) => {
+          const me = qs(m);
+          if (!me || me === self) return;
+          const lab = me.labels && me.labels[0];
+          const r0 = viewRect(me);
+          const b = viewRect(lab && (r0.width < 4 || r0.height < 4 || parseFloat(getComputedStyle(me).opacity) < 0.05) ? lab : me);
+          if (!(b.width > 0 && b.height > 0)) return;
+          gOutline.appendChild(svg('rect', { x: b.left + W.scrollX - 2, y: b.top + W.scrollY - 2, width: b.width + 4, height: b.height + 4, rx: 4,
+            fill: 'none', stroke: col, 'stroke-width': 1.2, 'stroke-opacity': 0.6, 'stroke-dasharray': '2 3', 'data-group-member': '1' }));
+        });
+      }
       const g = svg('g', { transform: `translate(${p.cx.toFixed(1)},${p.cy.toFixed(1)})`, 'data-index': p.seqIndex, 'data-visibility': stop.visibility || 'visible' });
       g.appendChild(svg('circle', { r: p.r + 4, fill: col, 'fill-opacity': p.isHidden ? 0.12 : 0.22 }));
       g.appendChild(svg('circle', { r: p.r, fill: '#0D0D11', stroke: col, 'stroke-width': 2.5, 'stroke-dasharray': p.isHidden ? '4 3' : null }));
       const t = svg('text', { x: 0, y: 4, 'text-anchor': 'middle', 'font-family': FONT, 'font-size': p.label.length > 2 ? 10 : 11.5, 'font-weight': 800, fill: '#FFFFFF' });
       t.textContent = p.label;
       g.appendChild(t);
+      if (stop.keyTag) {
+        // Keys beyond a single Tab press at this stop (radio group arrows, date parts, frames, scrollers).
+        const kt = String(stop.keyTag), kw = kt.length * 6.4 + 12;
+        const kp = svg('g', { transform: `translate(${clamp(-kw / 2, 2 - p.cx, docW - 2 - kw - p.cx).toFixed(1)},${p.r + 6})`, 'data-key-tag': '1' });
+        kp.appendChild(svg('rect', { x: 0, y: 0, width: kw.toFixed(0), height: 16, rx: 8, fill: '#0D0D11', stroke: TT_COLORS.seq, 'stroke-width': 1.2 }));
+        const kx = svg('text', { x: 6, y: 11.5, 'font-family': FONT, 'font-size': 10.5, 'font-weight': 700, fill: TT_COLORS.seq });
+        kx.textContent = kt;
+        kp.appendChild(kx);
+        g.appendChild(kp);
+      }
       if (p.isHidden) {
         const txt = p.offscreen ? 'hidden · off-screen' : 'hidden';
         const w = txt.length * 6.2 + 12;
@@ -3458,7 +3772,7 @@
     const el = HUD.curEl, c = HUD.cursor;
     if (!el || !c) return;
     if (!el.isConnected) { c.classList.remove('__af_on'); return; }
-    const r = el.getBoundingClientRect();
+    const r = viewRect(el);
     const pad = 4, edge = 3;
     // Clamp to the viewport so full-width/tall elements (landmarks) still show all four edges.
     const x1 = Math.max(r.left - pad, edge), y1 = Math.max(r.top - pad, edge);

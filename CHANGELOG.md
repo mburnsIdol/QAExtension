@@ -8,6 +8,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased] - 2026-10-06
 
+### Fixed
+- **Tab trail now matches real Chrome Tab order.** Checked against real Tab, Shift+Tab and arrow-key presses in Chromium 153 (see `qa-test-site`).
+  - **Radio groups:** each native group is one stop, as in Chrome. The stop is the checked option, or the first option in Tab order when none can take focus. A "↕ N options" tag and dotted outlines show the options reached with arrow keys. "You are here" stays on the group while you arrow between options.
+  - **Stops that were missing:**
+    - `contenteditable` regions
+    - Scroll areas with nothing focusable inside (Chrome makes these Tab stops)
+    - Image-map `<area>` links
+    - Controls inside web components (Shadow DOM), including slotted content
+    - Controls inside same-origin iframes
+  - **Multi-press stops are labelled:** date/time fields ("⇥ parts"), media players and cross-origin frames each show a tag, with a fuller hint in the Tab drawer.
+  - **New flow anomalies:**
+    - ARIA widgets where every item is a separate Tab stop (for example, a tablist without roving tabindex)
+    - Radio buttons with no `name`, which are not grouped
+- **False positives removed:**
+  - Skip links parked off-screen and revealed on `:focus` are no longer reported as hidden focusable content or as screen-reader barriers.
+  - Card-style radios and checkboxes (visually hidden input with a visible label) are no longer reported as hidden.
+  - Text inside a scroll area no longer counts as overlapping the content below it.
+  - Empty elements are reported as empty, not as hidden content.
+- **No double counting.** A defect axe already reports is not reported again by the tool's own rule. This covers link-name / area-alt vs. `af-link-no-text`, aria-hidden-focus vs. `af-hidden-focusable`, target-size vs. `af-target-size`, and meta-viewport vs. `af-viewport-zoom`.
+
 ### Changed
 - **Side panel tidy-up.**
   - Spacing and type now follow one consistent scale.

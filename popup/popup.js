@@ -1631,7 +1631,8 @@
         lead: h('span', { class: `idx${s.isAnomaly ? ' is-warn' : ''}`, 'aria-hidden': 'true' }, i + 1),
         title: s.name || h('span', { class: 'tone-red' }, '(no accessible name)'),
         sub: [[s.role, s.tabindex != null ? `tabindex=${s.tabindex}` : null].filter((x) => x != null).join(' · '),
-          s.warning ? h('span', { class: 'row-sub tone-amber' }, s.warning) : null],
+          s.warning ? h('span', { class: 'row-sub tone-amber' }, s.warning) : null,
+          s.keys ? h('span', { class: 'row-sub tone-cyan' }, `⌨ ${s.keys}`) : null],
         chips: [visChip(s)],
         actions: [locateBtn(s.selector, { impact: s.isAnomaly ? 'serious' : 'minor', ruleId: 'tab-order', title: `Tab stop #${i + 1}`, wcag: ['2.4.3'], message: s.warning || `${s.role} ${s.name}` }, `tab stop ${i + 1}`, `loc|${tabKey(s, i)}`)]
       }))));
